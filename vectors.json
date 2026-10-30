@@ -1,0 +1,33 @@
+{
+  "comment": "Screenlet protocol 1 test vectors: every implementation's tests check these. Byte strings are hex.",
+  "pairing": {
+    "cert_a": "636572742d61",
+    "cert_b": "636572742d62",
+    "pc_nonce": "00000000000000000000000000000000",
+    "app_nonce": "01010101010101010101010101010101",
+    "code": "923178"
+  },
+  "commitment": {
+    "app_nonce": "02020202020202020202020202020202",
+    "app_cert": "617070",
+    "pc_cert": "7063",
+    "commit": "b37ff558d1ff9eef7e1089261643ce3f606d564c8520a7420640a5bad2604014"
+  },
+  "sealed": {
+    "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "direction": 1,
+    "count": 42,
+    "body": "0401020304050607080102030405060708",
+    "packet": "00000001000000000000002aa91773c0dd9c97cdb40cbac51f0669ecb300f1094ac3d8239080f2ecf1e1bb4829"
+  },
+  "cable_frame": {
+    "kind": 4,
+    "connection": 0,
+    "data": "010203",
+    "frame": "040000000003010203"
+  },
+  "input": {
+    "comment": "one finger id 3 at (0.5, 0.25); one pen sample, tip and in range, at (0.5, 0.5), half pressure, upright",
+    "body": "060103 7fff 3fff 01 11 ff3f ff3f 0008 00 00"
+  }
+}

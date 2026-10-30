@@ -1,0 +1,111 @@
+<Window x:Class="Screenlet.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="32"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Grid x:Name="TitleArea" Padding="16,0">
+            <TextBlock Text="Screenlet" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center"/>
+        </Grid>
+        <ScrollViewer Grid.Row="1">
+            <StackPanel Padding="24,8,24,24">
+                <Grid ColumnSpacing="14" Margin="0,0,0,2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Image x:Name="Logo" Width="56" Height="56"/>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                        <TextBlock Text="Screenlet" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <Ellipse x:Name="Dot" Width="8" Height="8" Fill="{ThemeResource TextFillColorTertiaryBrush}"/>
+                            <TextBlock x:Name="State" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+
+                <TextBlock Text="Devices" Style="{StaticResource Section}"/>
+                <StackPanel x:Name="Devices"/>
+
+                <TextBlock Text="Display" Style="{StaticResource Section}"/>
+                <Border Style="{StaticResource Card}">
+                    <Grid>
+                        <TextBlock Text="Show the desktop" VerticalAlignment="Center"/>
+                        <Button x:Name="Install" Content="Install Extend" Click="InstallClicked" HorizontalAlignment="Right" Visibility="Collapsed"/>
+                        <ComboBox x:Name="Display" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="display">
+                            <ComboBoxItem Content="Extend" Tag="extend"/>
+                            <ComboBoxItem Content="Mirror" Tag="mirror"/>
+                        </ComboBox>
+                    </Grid>
+                </Border>
+                <Border Style="{StaticResource Card}">
+                    <Grid>
+                        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                            <TextBlock Text="Optimize for" VerticalAlignment="Center"/>
+                            <Button x:Name="PriorityHelp" Style="{StaticResource HelpButton}"/>
+                        </StackPanel>
+                        <ComboBox x:Name="Priority" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="priority">
+                            <ComboBoxItem Content="Lowest latency" Tag="latency"/>
+                            <ComboBoxItem Content="Balanced" Tag="balanced"/>
+                            <ComboBoxItem Content="Sharpest" Tag="clarity"/>
+                        </ComboBox>
+                    </Grid>
+                </Border>
+
+                <TextBlock Text="Settings" Style="{StaticResource Section}"/>
+                <Border Style="{StaticResource Card}">
+                    <Grid>
+                        <TextBlock Text="Start with Windows" VerticalAlignment="Center"/>
+                        <ToggleSwitch x:Name="Login" OnContent="" OffContent="" MinWidth="0" HorizontalAlignment="Right" Margin="0,0,-8,0" Toggled="Toggled" Tag="login"/>
+                    </Grid>
+                </Border>
+
+                <Expander Header="Advanced" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Margin="0,4,0,0">
+                    <StackPanel Spacing="12">
+                        <Grid>
+                            <TextBlock Text="Refresh rate" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="Fps" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="fps">
+                                <ComboBoxItem Content="The tablet's" Tag="0"/>
+                                <ComboBoxItem Content="60 Hz" Tag="60"/>
+                                <ComboBoxItem Content="30 Hz" Tag="30"/>
+                            </ComboBox>
+                        </Grid>
+                        <Grid>
+                            <TextBlock Text="Bitrate" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="Kbps" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="kbps">
+                                <ComboBoxItem Content="Automatic" Tag="0"/>
+                                <ComboBoxItem Content="8 Mbit/s" Tag="8000"/>
+                                <ComboBoxItem Content="12 Mbit/s" Tag="12000"/>
+                                <ComboBoxItem Content="20 Mbit/s" Tag="20000"/>
+                                <ComboBoxItem Content="30 Mbit/s" Tag="30000"/>
+                                <ComboBoxItem Content="40 Mbit/s" Tag="40000"/>
+                            </ComboBox>
+                        </Grid>
+                        <Grid>
+                            <TextBlock Text="Packets" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="Packets" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="packets">
+                                <ComboBoxItem Content="Automatic" Tag="auto"/>
+                                <ComboBoxItem Content="Large" Tag="large"/>
+                                <ComboBoxItem Content="Small" Tag="small"/>
+                            </ComboBox>
+                        </Grid>
+                        <Grid>
+                            <TextBlock Text="Keyframes" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="Keyframes" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="keyframes">
+                                <ComboBoxItem Content="Automatic" Tag="0"/>
+                                <ComboBoxItem Content="Every 2 s" Tag="2"/>
+                                <ComboBoxItem Content="Every 5 s" Tag="5"/>
+                                <ComboBoxItem Content="Every 30 s" Tag="30"/>
+                            </ComboBox>
+                        </Grid>
+                        <TextBlock Text="From the next session" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <TextBlock Text="Statistics" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,6,0,0"/>
+                        <TextBlock x:Name="Stats" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Shown while the desktop is on the tablet"/>
+                    </StackPanel>
+                </Expander>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Window>
