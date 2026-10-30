@@ -5,7 +5,7 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::*;
 
-const RUN: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+const RUN: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 
 #[derive(Clone)]
 pub struct Mode {
@@ -15,11 +15,19 @@ pub struct Mode {
     pub packets: String,
     pub keyframes: u32, // seconds, 0: rarely
     pub extend: bool,   // a monitor of its own, when the driver is there
+    pub resolution: String, // "auto", "tablet" (native) or "WxH"
+    pub mirror: String,     // the monitor to mirror (\.\DISPLAY1), "" for the first
+    pub codec: String,      // "auto", "avc", "hevc"
+    pub vbv_frames: f64,    // the largest frame in average ones, 0: from priority
+    pub connection: String, // "auto", "wifi", "cable"
+    pub auto_start: bool,   // show the desktop when a paired tablet is plugged in
+    pub tablet_screen: Option<(i32, i32)>, // the last tablet's, for the resolutions offered
 }
 
 impl Default for Mode {
     fn default() -> Mode {
-        Mode { priority: "balanced".into(), fps: 0, kbps: 0, packets: "auto".into(), keyframes: 0, extend: true }
+        Mode { priority: "balanced".into(), fps: 0, kbps: 0, packets: "auto".into(), keyframes: 0, extend: true, resolution: "auto".into(),
+            mirror: String::new(), codec: "auto".into(), vbv_frames: 0.0, connection: "auto".into(), auto_start: false, tablet_screen: None }
     }
 }
 
@@ -32,12 +40,22 @@ impl Mode {
         let word = |key: &str, default: &str| v[key].as_str().unwrap_or(default).to_string();
         Mode { priority: word("priority", &d.priority), fps: number("fps", d.fps), kbps: number("kbps", d.kbps),
             packets: word("packets", &d.packets), keyframes: number("keyframes", d.keyframes),
-            extend: v["display"].as_str().is_none_or(|d| d != "mirror") }
+            extend: v["display"].as_str().is_none_or(|d| d != "mirror"), resolution: word("resolution", &d.resolution),
+            mirror: word("mirror", &d.mirror), codec: word("codec", &d.codec), vbv_frames: v["vbv_frames"].as_f64().unwrap_or(d.vbv_frames),
+            connection: word("connection", &d.connection), auto_start: v["auto_start"].as_bool().unwrap_or(d.auto_start),
+            tablet_screen: v["tablet_screen"].as_array().and_then(|a| Some((a.first()?.as_i64()? as i32, a.get(1)?.as_i64()? as i32))) }
     }
 
     pub fn json(&self) -> Value {
         json!({"priority": self.priority, "fps": self.fps, "kbps": self.kbps, "packets": self.packets, "keyframes": self.keyframes,
-            "display": if self.extend { "extend" } else { "mirror" }})
+            "display": if self.extend { "extend" } else { "mirror" }, "resolution": self.resolution, "mirror": self.mirror,
+            "codec": self.codec, "vbv_frames": self.vbv_frames, "connection": self.connection, "auto_start": self.auto_start,
+            "tablet_screen": self.tablet_screen.map(|s| [s.0, s.1])})
+    }
+
+    pub fn save(&self) {
+        let _ = std::fs::create_dir_all(config());
+        let _ = std::fs::write(config().join("settings.json"), self.json().to_string());
     }
 
     /// One setting from the window, kept.
@@ -45,17 +63,21 @@ impl Mode {
         match key {
             "priority" if matches!(value, "latency" | "balanced" | "clarity") => self.priority = value.into(),
             "packets" if matches!(value, "auto" | "large" | "small") => self.packets = value.into(),
+            "codec" if matches!(value, "auto" | "avc" | "hevc") => self.codec = value.into(),
+            "connection" if matches!(value, "auto" | "wifi" | "cable") => self.connection = value.into(),
             "fps" => self.fps = value.parse().unwrap_or(0),
             "kbps" => self.kbps = value.parse().unwrap_or(0),
             "keyframes" => self.keyframes = value.parse().unwrap_or(0),
+            "vbv_frames" => self.vbv_frames = value.parse().unwrap_or(0.0),
             "display" => self.extend = value != "mirror",
+            "resolution" => self.resolution = value.into(),
+            "mirror" => self.mirror = value.into(),
+            "auto_start" => self.auto_start = value == "1",
             _ => return,
         }
-        let _ = std::fs::create_dir_all(config());
-        let _ = std::fs::write(config().join("settings.json"), self.json().to_string());
+        self.save();
     }
 }
-
 pub fn starts_with_windows() -> bool {
     let mut size = 0;
     unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN, w!("Screenlet"), RRF_RT_REG_SZ, None, None, Some(&mut size)) == ERROR_SUCCESS }

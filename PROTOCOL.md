@@ -264,7 +264,7 @@ USB-C without tethering or developer options. The computer is the USB host.
 
 1. The computer sends AOA control requests 51 (get protocol), 52 (send
    strings), 53 (start) with: manufacturer `Screenlet`, model `Screenlet`,
-   description `Screenlet on the Mac`, version `1`, URI
+   description `Screenlet on the PC` (or the Mac), version `1`, URI
    `https://github.com/DavideLoconte/Screenlet-Companion`.
 2. The tablet re-enumerates as an accessory (Google VID `0x18D1`, PID
    `0x2D00`), asks its user once, and opens the app.

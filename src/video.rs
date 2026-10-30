@@ -1,11 +1,11 @@
-//! The desktop to H.264: Desktop Duplication into Media Foundation.
+//! The desktop to H.264 or HEVC: Desktop Duplication into Media Foundation.
 use crate::link::Result;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use windows::core::Interface;
+use windows::core::{Interface, GUID};
 use windows::Win32::Foundation::{E_FAIL, HMODULE, LUID};
 use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D11::*;
@@ -16,9 +16,11 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::Variant::{VARIANT, VT_UI4};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
-const KEYFRAME_SECONDS: u32 = 10;
+pub const KEYFRAME_SECONDS: u32 = 10;
 const WAIT_MS: u32 = 100; // for a new frame, between looks at stop and keyframe
 const ENCODER_WAIT_MS: u64 = 40; // for its frame, then on to the next: it comes with that one
+const SETTLE_MS: u32 = 30; // the wait for a new frame while the screen may have just gone still
+const SETTLE_FRAMES: u32 = 3; // the last picture again, to bring it out of an encoder that holds frames
 const TARGETS: usize = 4;
 const POINTER_MAX: u32 = 256;
 
@@ -35,47 +37,125 @@ pub fn now() -> i64 {
     ticks_to_ns(ticks)
 }
 
+/// The codecs this PC encodes in hardware, the preferred first: H.264, the quickest; HEVC
+/// for clarity. H.264 alone, in software, when it has none (PROTOCOL.md §3).
+pub fn codecs(clarity: bool) -> Vec<String> {
+    let in_hardware = |subtype: GUID| unsafe {
+        let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype };
+        let mut list = std::ptr::null_mut();
+        let mut count = 0;
+        let looked = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, None, Some(&output), &mut list, &mut count);
+        if looked.is_ok() && !list.is_null() {
+            for i in 0..count as usize { std::ptr::drop_in_place(list.add(i)); }
+            CoTaskMemFree(Some(list as _));
+        }
+        looked.is_ok() && count > 0
+    };
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+    }
+    let mut found: Vec<String> = Vec::new();
+    if in_hardware(MFVideoFormat_H264) { found.push("avc".into()); }
+    if in_hardware(MFVideoFormat_HEVC) { found.push("hevc".into()); }
+    if clarity { found.reverse(); }
+    if found.is_empty() { found.push("avc".into()); }
+    found
+}
+
+/// A screen that goes still must end on its last picture. That one may have been left out
+/// (the network behind), and an encoder may hold its frame until the next comes, which on
+/// a still screen never does: a window dragged away, or the pointer, would stay on the tablet.
+#[derive(Default)]
+struct Settling {
+    left_out: bool,
+    repeats: u32,
+}
+
+#[derive(Debug, PartialEq)]
+enum Still {
+    Nothing,
+    Repeat,
+    LeftOut, // the picture that was left out, at last
+}
+
+impl Settling {
+    fn taken(&mut self) {
+        self.left_out = false;
+        self.repeats = SETTLE_FRAMES;
+    }
+
+    fn busy(&self) -> bool { self.left_out || self.repeats > 0 }
+
+    /// No new frame came, and the network has room.
+    fn still(&mut self) -> Still {
+        if self.left_out {
+            self.taken();
+            return Still::LeftOut;
+        }
+        if self.repeats == 0 { return Still::Nothing; }
+        self.repeats -= 1;
+        Still::Repeat
+    }
+}
+
+/// What goes to the tablet.
+pub enum Source {
+    /// A monitor by its device name, or the first.
+    Screen(Option<String>),
+    /// A moving test pattern of this size: the same load every run.
+    Pattern((i32, i32)),
+}
+
 #[derive(Default)]
 struct Control {
     stop: AtomicBool,
     paused: AtomicBool,
     keyframe: AtomicBool,
     kbps: AtomicU32,
+    skipped: Arc<AtomicU32>,
 }
 
 pub struct Video {
     pub name: String,
-    pub size: (i32, i32),
+    pub size: (i32, i32),   // encoded
+    pub screen: (i32, i32), // the monitor's
     pub origin: (i32, i32), // of the monitor on the desktop
+    /// Frames not encoded since this was last read: the network behind.
+    pub skipped: Arc<AtomicU32>,
     control: Arc<Control>,
     error: Arc<Mutex<Option<String>>>,
     thread: Option<JoinHandle<()>>,
 }
 
-type OnFrame = Box<dyn FnMut(&[u8], bool, i64) + Send>;
+/// bytes, keyframe, captured, into the encoder (ns, now()'s clock).
+pub type OnFrame = Box<dyn FnMut(&[u8], bool, i64, i64) + Send>;
 
 impl Video {
-    /// on_frame(annex_b, keyframe, captured) on the capture thread; skip() leaves a frame out.
-    pub fn start(fps: u32, kbps: u32, fit: (i32, i32), keyframes: u32, output: Option<String>, skip: Box<dyn Fn() -> bool + Send>, on_frame: OnFrame) -> Result<Video> {
+    /// on_frame on the capture thread; skip() leaves a frame out.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start(source: Source, codec: &str, fps: u32, kbps: u32, vbv_frames: f64, fit: (i32, i32), keyframes: u32, skip: Box<dyn Fn() -> bool + Send>, on_frame: OnFrame) -> Result<Video> {
         let control = Arc::new(Control { kbps: AtomicU32::new(kbps), ..Default::default() });
+        let skipped = control.skipped.clone();
         let error = Arc::new(Mutex::new(None));
         let (ready_tx, ready) = mpsc::channel();
         let (c, e) = (control.clone(), error.clone());
+        let subtype = if codec == "hevc" { MFVideoFormat_HEVC } else { MFVideoFormat_H264 };
         let thread = std::thread::Builder::new().name("screenlet-video".into()).spawn(move || {
-            let result = unsafe { Capture::open(fps, c.kbps.load(Ordering::Relaxed), fit, if keyframes > 0 { keyframes } else { KEYFRAME_SECONDS }, output.as_deref()) };
+            let result = unsafe { Capture::open(&source, subtype, fps, c.kbps.load(Ordering::Relaxed), vbv_frames, fit, if keyframes > 0 { keyframes } else { KEYFRAME_SECONDS }) };
             let mut capture = match result {
                 Ok(capture) => {
-                    let _ = ready_tx.send(Ok((capture.encoder.name.clone(), capture.size, capture.origin)));
+                    let _ = ready_tx.send(Ok((capture.encoder.name.clone(), capture.size, (capture.screen.0 as i32, capture.screen.1 as i32), capture.origin)));
                     capture
                 }
                 Err(e) => { let _ = ready_tx.send(Err(e.to_string())); return; }
             };
-            if let Err(failure) = unsafe { capture.run(&c, skip, on_frame) } {
+            if let Err(failure) = unsafe { capture.run(&c, skip, on_frame, fps) } {
                 *e.lock().unwrap() = Some(failure.to_string());
             }
         })?;
-        let (name, size, origin) = ready.recv().map_err(|_| "the capture thread ended")??;
-        Ok(Video { name, size, origin, control, error, thread: Some(thread) })
+        let (name, size, screen, origin) = ready.recv().map_err(|_| "the capture thread ended")??;
+        Ok(Video { name, size, screen, origin, skipped, control, error, thread: Some(thread) })
     }
 
     pub fn pause(&self, paused: bool) { self.control.paused.store(paused, Ordering::Relaxed); }
@@ -104,6 +184,18 @@ pub fn nv12(bgra: &[u8], pitch: usize, width: usize, height: usize, out: &mut [u
                 chroma[at] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
                 chroma[at + 1] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
             }
+        }
+    }
+}
+
+/// A BGRA test pattern for frame number frame: a diagonal gradient that moves, and a bar
+/// that crosses it, so that every frame differs from the last everywhere.
+pub fn pattern(picture: &mut [u8], width: usize, height: usize, frame: usize) {
+    for (y, row) in picture.chunks_exact_mut(width * 4).take(height).enumerate() {
+        for (x, p) in row.chunks_exact_mut(4).enumerate() {
+            let bar = (x + frame * 7) % width < width / 16;
+            let shade = ((x + y + frame * 3) & 0xff) as u8;
+            p.copy_from_slice(&if bar { [255, 255, 255, 255] } else { [shade, shade / 2, 255 - shade, 255] });
         }
     }
 }
@@ -166,24 +258,37 @@ struct Encoder {
     time: i64,
     frame: i64, // 100 ns
     kbps: u32,
+    vbv_bits: f64,                          // of the largest frame, for each kbit/s
     events: Option<IMFMediaEventGenerator>, // hardware encoders are asynchronous
     needed: u32,                            // inputs it asked for
 }
 
+/// What an encoder is opened for.
+#[derive(Clone, Copy)]
+struct Wanted {
+    subtype: GUID,
+    width: u32,
+    height: u32,
+    fps: u32,
+    kbps: u32,
+    vbv_frames: f64,
+    keyframes: u32,
+}
+
 impl Encoder {
     /// Software, in system memory: every PC has it.
-    unsafe fn software(width: u32, height: u32, fps: u32, kbps: u32, keyframes: u32) -> Result<Encoder> {
-        let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
+    unsafe fn software(wanted: Wanted) -> Result<Encoder> {
+        let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: wanted.subtype };
         let mut list = std::ptr::null_mut();
         let mut count = 0;
         MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER, None, Some(&output), &mut list, &mut count)?;
-        if count == 0 { return Err("no H.264 encoder".into()); }
-        Self::activate((*list).as_ref().ok_or(windows::core::Error::from(E_FAIL))?, None, width, height, fps, kbps, keyframes)
+        if count == 0 { return Err("no software encoder for this codec".into()); }
+        Self::activate((*list).as_ref().ok_or(windows::core::Error::from(E_FAIL))?, None, wanted)
     }
 
     /// The GPU's own, on the adapter of the frames, taking its textures.
-    unsafe fn hardware(device: &ID3D11Device, luid: LUID, width: u32, height: u32, fps: u32, kbps: u32, keyframes: u32) -> Result<Encoder> {
-        let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
+    unsafe fn hardware(device: &ID3D11Device, luid: LUID, wanted: Wanted) -> Result<Encoder> {
+        let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: wanted.subtype };
         let mut attributes = None;
         MFCreateAttributes(&mut attributes, 1)?;
         let attributes = attributes.ok_or("no attributes")?;
@@ -192,15 +297,16 @@ impl Encoder {
         let mut list = std::ptr::null_mut();
         let mut count = 0;
         MFTEnum2(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, None, Some(&output), &attributes, &mut list, &mut count)?;
-        if count == 0 { return Err("no hardware H.264 encoder on this adapter".into()); }
+        if count == 0 { return Err("no hardware encoder on this adapter".into()); }
         let (mut token, mut manager) = (0, None);
         MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
         let manager = manager.ok_or("no device manager")?;
         manager.ResetDevice(device, token)?;
-        Self::activate((*list).as_ref().ok_or(windows::core::Error::from(E_FAIL))?, Some(&manager), width, height, fps, kbps, keyframes)
+        Self::activate((*list).as_ref().ok_or(windows::core::Error::from(E_FAIL))?, Some(&manager), wanted)
     }
 
-    unsafe fn activate(activate: &IMFActivate, manager: Option<&IMFDXGIDeviceManager>, width: u32, height: u32, fps: u32, kbps: u32, keyframes: u32) -> Result<Encoder> {
+    unsafe fn activate(activate: &IMFActivate, manager: Option<&IMFDXGIDeviceManager>, wanted: Wanted) -> Result<Encoder> {
+        let Wanted { subtype, width, height, fps, kbps, vbv_frames, keyframes } = wanted;
         let mut text = windows::core::PWSTR::null();
         let mut length = 0;
         activate.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut text, &mut length)?;
@@ -216,21 +322,23 @@ impl Encoder {
             mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)?;
         }
         let codec = mft.cast::<ICodecAPI>().ok();
-        let mut encoder = Encoder { mft: mft.clone(), codec, name, time: 0, frame: 10_000_000 / fps as i64, kbps, needed: 0,
-            events: if asynchronous { Some(mft.cast()?) } else { None } };
+        let encoder = Encoder { mft: mft.clone(), codec, name, time: 0, frame: 10_000_000 / fps as i64, kbps, needed: 0,
+            vbv_bits: 1000.0 / fps as f64 * vbv_frames, events: if asynchronous { Some(mft.cast()?) } else { None } };
         encoder.set(&CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR.0 as u32);
         encoder.set(&CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+        encoder.set(&CODECAPI_AVEncCommonBufferSize, (kbps as f64 * encoder.vbv_bits) as u32);
         let size = (width as u64) << 32 | height as u64;
         let rate = (fps as u64) << 32 | 1;
         let out = MFCreateMediaType()?;
         out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-        out.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+        out.SetGUID(&MF_MT_SUBTYPE, &subtype)?;
         out.SetUINT32(&MF_MT_AVG_BITRATE, kbps * 1000)?;
         out.SetUINT64(&MF_MT_FRAME_SIZE, size)?;
         out.SetUINT64(&MF_MT_FRAME_RATE, rate)?;
         out.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-        out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
-        out.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, (fps * keyframes).min(1024))?;
+        let profile = if subtype == MFVideoFormat_HEVC { eAVEncH265VProfile_Main_420_8.0 } else { eAVEncH264VProfile_Base.0 };
+        out.SetUINT32(&MF_MT_MPEG2_PROFILE, profile as u32)?;
+        out.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, crate::sizes::keyframe_interval(fps, keyframes))?;
         mft.SetOutputType(0, &out, 0)?;
         let input = MFCreateMediaType()?;
         input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -285,9 +393,15 @@ impl Encoder {
             } else if kind == METransformHaveOutput.0 as u32 {
                 let mut outputs = [MFT_OUTPUT_DATA_BUFFER::default()]; // the encoder's sample
                 let mut status = 0;
-                self.mft.ProcessOutput(0, &mut outputs, &mut status)?;
+                let result = self.mft.ProcessOutput(0, &mut outputs, &mut status);
                 let sample = std::mem::ManuallyDrop::take(&mut outputs[0].pSample);
                 std::mem::ManuallyDrop::drop(&mut outputs[0].pEvents);
+                if matches!(&result, Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE) {
+                    // It settled its format with the first frame: taken, and it says again.
+                    self.mft.SetOutputType(0, &self.mft.GetOutputAvailableType(0, 0)?, 0)?;
+                    continue;
+                }
+                result?;
                 if let Some(sample) = sample { self.output(&sample, out)?; }
                 if !want_input { return Ok(true); }
             }
@@ -298,6 +412,7 @@ impl Encoder {
         if kbps != self.kbps {
             self.kbps = kbps;
             self.set(&CODECAPI_AVEncCommonMeanBitRate, kbps * 1000);
+            self.set(&CODECAPI_AVEncCommonBufferSize, (kbps as f64 * self.vbv_bits) as u32);
         }
         if keyframe { self.set(&CODECAPI_AVEncVideoForceKeyFrame, 1); }
         let buffer = match picture {
@@ -337,6 +452,7 @@ impl Encoder {
             match result {
                 Ok(()) => self.output(&sample, &mut out)?,
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(()),
+                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => self.mft.SetOutputType(0, &self.mft.GetOutputAvailableType(0, 0)?, 0)?,
                 Err(e) => return Err(e.into()),
             }
         }
@@ -396,8 +512,7 @@ impl Gpu {
 struct Capture {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    output: IDXGIOutput1,
-    duplication: IDXGIOutputDuplication,
+    duplicating: Option<(IDXGIOutput1, IDXGIOutputDuplication)>, // none: the test pattern
     staging: ID3D11Texture2D,
     canvas: ID3D11Texture2D,
     under: ID3D11Texture2D,
@@ -411,10 +526,11 @@ struct Capture {
 }
 
 impl Capture {
-    unsafe fn open(fps: u32, kbps: u32, fit: (i32, i32), keyframes: u32, shown: Option<&str>) -> Result<Capture> {
+    unsafe fn open(source: &Source, subtype: GUID, fps: u32, kbps: u32, vbv_frames: f64, fit: (i32, i32), keyframes: u32) -> Result<Capture> {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         MFStartup(MF_VERSION, MFSTARTUP_FULL)?;
         // The chosen monitor, or the first one, and its adapter.
+        let shown = match source { Source::Screen(name) => name.as_deref(), Source::Pattern(_) => None };
         let factory = CreateDXGIFactory1::<IDXGIFactory1>()?;
         let mut found = None;
         let mut a = 0;
@@ -439,14 +555,20 @@ impl Capture {
                 D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context))?;
         }
         let (device, context): (ID3D11Device, ID3D11DeviceContext) = (device.unwrap(), context.unwrap());
-        device.cast::<ID3D11Multithread>()?.SetMultithreadProtected(true); // the encoder uses it too
+        let _ = device.cast::<ID3D11Multithread>()?.SetMultithreadProtected(true); // the encoder uses it too
         let luid = adapter.GetDesc()?.AdapterLuid;
         let output = output.cast::<IDXGIOutput1>()?;
         let desktop = output.GetDesc()?.DesktopCoordinates;
         let origin = (desktop.left, desktop.top);
-        let duplication = output.DuplicateOutput(&device)?;
-        let mode = duplication.GetDesc().ModeDesc;
-        let screen = (mode.Width & !1, mode.Height & !1);
+        let (duplicating, screen) = match source {
+            Source::Pattern(size) => (None, (size.0 as u32 & !1, size.1 as u32 & !1)),
+            Source::Screen(_) => {
+                let duplication = output.DuplicateOutput(&device)?;
+                let mode = duplication.GetDesc().ModeDesc;
+                let screen = (mode.Width & !1, mode.Height & !1);
+                (Some((output, duplication)), screen)
+            }
+        };
         let texture = |usage, access: u32, bind: u32, w, h| -> Result<ID3D11Texture2D> {
             let description = D3D11_TEXTURE2D_DESC { Width: w, Height: h, MipLevels: 1, ArraySize: 1,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
@@ -462,16 +584,17 @@ impl Capture {
         let scaled = crate::sizes::fit((screen.0 as i32, screen.1 as i32), fit);
         let to = (scaled.0 as u32 & !1, scaled.1 as u32 & !1);
         // The GPU's way, if all of it is there; any failure and the frames take the CPU's.
-        let fast = Encoder::hardware(&device, luid, to.0, to.1, fps, kbps, keyframes)
+        let wanted = Wanted { subtype, width: to.0, height: to.1, fps, kbps, vbv_frames, keyframes };
+        let fast = Encoder::hardware(&device, luid, wanted)
             .and_then(|encoder| Ok((encoder, Gpu::open(&device, &context, &canvas, screen, to, fps)?)));
         let (encoder, gpu, size) = match fast {
             Ok((encoder, gpu)) => (encoder, Some(gpu), to),
             Err(e) => {
                 eprintln!("video: no hardware path ({e}): software, at the screen's size");
-                (Encoder::software(screen.0, screen.1, fps, kbps, keyframes)?, None, screen)
+                (Encoder::software(Wanted { width: screen.0, height: screen.1, ..wanted })?, None, screen)
             }
         };
-        Ok(Capture { device, context, output, duplication, staging, canvas, under, gpu, encoder,
+        Ok(Capture { device, context, duplicating, staging, canvas, under, gpu, encoder,
             size: (size.0 as i32, size.1 as i32), screen, origin, shape: Shape::default(), pointer: None })
     }
 
@@ -483,7 +606,8 @@ impl Capture {
         if info.PointerShapeBufferSize > 0 {
             self.shape.bytes.resize(info.PointerShapeBufferSize as usize, 0);
             let (mut used, mut shape) = (0, DXGI_OUTDUPL_POINTER_SHAPE_INFO::default());
-            self.duplication.GetFramePointerShape(info.PointerShapeBufferSize, self.shape.bytes.as_mut_ptr() as _, &mut used, &mut shape)?;
+            let Some((_, duplication)) = &self.duplicating else { return Ok(()) };
+            duplication.GetFramePointerShape(info.PointerShapeBufferSize, self.shape.bytes.as_mut_ptr() as _, &mut used, &mut shape)?;
             self.shape.kind = shape.Type;
             self.shape.width = shape.Width as usize;
             self.shape.height = shape.Height as usize;
@@ -514,54 +638,112 @@ impl Capture {
         Ok(())
     }
 
-    unsafe fn run(&mut self, control: &Control, skip: Box<dyn Fn() -> bool + Send>, mut on_frame: OnFrame) -> Result<()> {
+    /// The canvas into what the encoder takes.
+    unsafe fn convert(&mut self, plane: &mut [u8], target: &mut Option<ID3D11Texture2D>) -> Result<()> {
+        if let Some(gpu) = &mut self.gpu {
+            *target = Some(gpu.convert()?);
+            return Ok(());
+        }
+        let (width, height) = (self.size.0 as usize, self.size.1 as usize);
+        self.context.CopyResource(&self.staging, &self.canvas);
+        let mut map = D3D11_MAPPED_SUBRESOURCE::default();
+        self.context.Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut map))?;
+        let pitch = map.RowPitch as usize;
+        nv12(std::slice::from_raw_parts(map.pData as *const u8, pitch * height), pitch, width, height, plane);
+        self.context.Unmap(&self.staging, 0);
+        Ok(())
+    }
+
+    /// The test pattern at fps, instead of the desktop.
+    unsafe fn run_pattern(&mut self, control: &Control, skip: Box<dyn Fn() -> bool + Send>, mut on_frame: OnFrame, fps: u32, plane: &mut [u8]) -> Result<()> {
+        let (width, height) = (self.screen.0 as usize, self.screen.1 as usize);
+        let mut picture = vec![0u8; width * height * 4];
+        let mut target = None;
+        let mut frame = 0;
+        let started = Instant::now();
+        while !control.stop.load(Ordering::Relaxed) {
+            frame += 1;
+            if let Some(wait) = (started + Duration::from_secs_f64(frame as f64 / fps as f64)).checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
+            }
+            if control.paused.load(Ordering::Relaxed) { continue; }
+            if skip() {
+                control.skipped.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            let captured = now();
+            pattern(&mut picture, width, height, frame);
+            self.context.UpdateSubresource(&self.canvas, 0, None, picture.as_ptr() as _, width as u32 * 4, 0);
+            self.convert(plane, &mut target)?;
+            let keyframe = control.keyframe.swap(false, Ordering::Relaxed);
+            let into = now();
+            let picture = match &target { Some(t) => Picture::Texture(t), None => Picture::Memory(plane) };
+            self.encoder.encode(picture, keyframe, control.kbps.load(Ordering::Relaxed), |bytes, key| on_frame(bytes, key, captured, into))?;
+        }
+        Ok(())
+    }
+
+    unsafe fn run(&mut self, control: &Control, skip: Box<dyn Fn() -> bool + Send>, mut on_frame: OnFrame, fps: u32) -> Result<()> {
         let (width, height) = (self.size.0 as usize, self.size.1 as usize);
         let mut plane = vec![0u8; if self.gpu.is_some() { 0 } else { width * height * 3 / 2 }];
+        let Some((output, mut duplication)) = self.duplicating.clone() else {
+            return self.run_pattern(control, skip, on_frame, fps, &mut plane);
+        };
         let mut target = None;
         let mut have = false;
         let mut captured = 0;
+        let mut settling = Settling::default();
         while !control.stop.load(Ordering::Relaxed) {
             let (mut info, mut resource) = (DXGI_OUTDUPL_FRAME_INFO::default(), None);
-            let fresh = match self.duplication.AcquireNextFrame(WAIT_MS, &mut info, &mut resource) {
+            let wait = if settling.busy() { SETTLE_MS } else { WAIT_MS };
+            let mut taken = false;
+            let fresh = match duplication.AcquireNextFrame(wait, &mut info, &mut resource) {
                 Ok(()) => info.LastPresentTime != 0 || info.LastMouseUpdateTime != 0,
                 Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => false,
                 Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                     // The secure desktop, or the display mode: same size or the session ends.
-                    self.duplication = self.output.DuplicateOutput(&self.device)?;
+                    duplication = output.DuplicateOutput(&self.device)?;
+                    self.duplicating = Some((output.clone(), duplication.clone()));
                     continue;
                 }
                 Err(e) => return Err(e.into()),
             };
             if let Some(resource) = resource {
                 self.follow_pointer(&info)?;
-                if fresh && !control.paused.load(Ordering::Relaxed) && !skip() {
+                if fresh && !control.paused.load(Ordering::Relaxed) {
                     let time = if info.LastPresentTime != 0 { info.LastPresentTime } else { info.LastMouseUpdateTime };
                     captured = ticks_to_ns(time);
+                    // On the canvas whatever comes next: a frame left out may be the last one.
                     let texture: ID3D11Texture2D = resource.cast()?;
                     let region = D3D11_BOX { left: 0, top: 0, front: 0, right: self.screen.0, bottom: self.screen.1, back: 1 };
                     self.context.CopySubresourceRegion(&self.canvas, 0, 0, 0, 0, &texture, 0, Some(&region));
                     self.draw_pointer()?;
-                    if let Some(gpu) = &mut self.gpu {
-                        target = Some(gpu.convert()?);
+                    taken = !skip();
+                    if taken {
+                        self.convert(&mut plane, &mut target)?;
+                        have = true;
+                        settling.taken();
                     } else {
-                        self.context.CopyResource(&self.staging, &self.canvas);
-                        let mut map = D3D11_MAPPED_SUBRESOURCE::default();
-                        self.context.Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut map))?;
-                        let pitch = map.RowPitch as usize;
-                        nv12(std::slice::from_raw_parts(map.pData as *const u8, pitch * height), pitch, width, height, &mut plane);
-                        self.context.Unmap(&self.staging, 0);
+                        settling.left_out = true;
+                        control.skipped.fetch_add(1, Ordering::Relaxed);
                     }
-                    have = true;
                 }
-                self.duplication.ReleaseFrame()?;
+                duplication.ReleaseFrame()?;
                 if !fresh { continue; }
             }
-            // A keyframe asked for on a still screen: the last frame again.
+            // On a still screen: the last frame again, for a keyframe or to settle.
+            let paused = control.paused.load(Ordering::Relaxed);
+            let still = if !fresh && !paused && settling.busy() && !skip() { settling.still() } else { Still::Nothing };
+            if still == Still::LeftOut {
+                self.convert(&mut plane, &mut target)?;
+                have = true;
+            }
             let keyframe = control.keyframe.swap(false, Ordering::Relaxed);
-            if have && (fresh || keyframe) && !control.paused.load(Ordering::Relaxed) {
-                let at = if fresh { captured } else { now() };
+            if have && (taken || keyframe || still != Still::Nothing) && !paused {
+                let at = if taken { captured } else { now() };
+                let into = now();
                 let picture = match &target { Some(t) => Picture::Texture(t), None => Picture::Memory(&plane) };
-                self.encoder.encode(picture, keyframe, control.kbps.load(Ordering::Relaxed), |bytes, key| on_frame(bytes, key, at))?;
+                self.encoder.encode(picture, keyframe, control.kbps.load(Ordering::Relaxed), |bytes, key| on_frame(bytes, key, at, into))?;
             }
         }
         Ok(())
@@ -574,6 +756,20 @@ mod tests {
 
     fn square(kind: u32, pixel: [u8; 4]) -> Shape {
         Shape { kind, width: 2, height: 2, pitch: 8, bytes: pixel.repeat(4) }
+    }
+
+    #[test]
+    fn a_screen_that_goes_still_ends_on_its_last_picture() {
+        let mut settling = Settling::default();
+        assert!(!settling.busy());
+        assert_eq!(settling.still(), Still::Nothing);
+        settling.taken();
+        for _ in 0..SETTLE_FRAMES { assert_eq!(settling.still(), Still::Repeat); }
+        assert!(!settling.busy());
+        settling.left_out = true;
+        assert_eq!(settling.still(), Still::LeftOut);
+        assert!(settling.busy()); // and that one settles too
+        assert_eq!(settling.still(), Still::Repeat);
     }
 
     #[test]

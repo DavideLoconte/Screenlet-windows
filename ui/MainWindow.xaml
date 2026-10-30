@@ -28,6 +28,19 @@
 
                 <TextBlock Text="Devices" Style="{StaticResource Section}"/>
                 <StackPanel x:Name="Devices"/>
+                <Border Style="{StaticResource Card}">
+                    <Grid>
+                        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                            <TextBlock Text="Connection" VerticalAlignment="Center"/>
+                            <Button x:Name="ConnectionHelp" Style="{StaticResource HelpButton}"/>
+                        </StackPanel>
+                        <ComboBox x:Name="Connection" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="connection">
+                            <ComboBoxItem Content="Automatic" Tag="auto"/>
+                            <ComboBoxItem Content="Wi-Fi" Tag="wifi"/>
+                            <ComboBoxItem Content="Cable" Tag="cable"/>
+                        </ComboBox>
+                    </Grid>
+                </Border>
 
                 <TextBlock Text="Display" Style="{StaticResource Section}"/>
                 <Border Style="{StaticResource Card}">
@@ -38,6 +51,21 @@
                             <ComboBoxItem Content="Extend" Tag="extend"/>
                             <ComboBoxItem Content="Mirror" Tag="mirror"/>
                         </ComboBox>
+                    </Grid>
+                </Border>
+                <Border x:Name="MonitorCard" Style="{StaticResource Card}">
+                    <Grid>
+                        <TextBlock Text="Monitor" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="Monitor" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="mirror"/>
+                    </Grid>
+                </Border>
+                <Border x:Name="ResolutionCard" Style="{StaticResource Card}">
+                    <Grid>
+                        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                            <TextBlock Text="Resolution" VerticalAlignment="Center"/>
+                            <Button x:Name="ResolutionHelp" Style="{StaticResource HelpButton}"/>
+                        </StackPanel>
+                        <ComboBox x:Name="Resolution" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="resolution"/>
                     </Grid>
                 </Border>
                 <Border Style="{StaticResource Card}">
@@ -61,6 +89,12 @@
                         <ToggleSwitch x:Name="Login" OnContent="" OffContent="" MinWidth="0" HorizontalAlignment="Right" Margin="0,0,-8,0" Toggled="Toggled" Tag="login"/>
                     </Grid>
                 </Border>
+                <Border Style="{StaticResource Card}">
+                    <Grid>
+                        <TextBlock Text="Show the desktop when the tablet is plugged in" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,60,0"/>
+                        <ToggleSwitch x:Name="AutoStart" OnContent="" OffContent="" MinWidth="0" HorizontalAlignment="Right" Margin="0,0,-8,0" Toggled="Toggled" Tag="auto_start"/>
+                    </Grid>
+                </Border>
 
                 <Expander Header="Advanced" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Margin="0,4,0,0">
                     <StackPanel Spacing="12">
@@ -68,8 +102,18 @@
                             <TextBlock Text="Refresh rate" VerticalAlignment="Center"/>
                             <ComboBox x:Name="Fps" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="fps">
                                 <ComboBoxItem Content="The tablet's" Tag="0"/>
+                                <ComboBoxItem Content="120 Hz" Tag="120"/>
+                                <ComboBoxItem Content="90 Hz" Tag="90"/>
                                 <ComboBoxItem Content="60 Hz" Tag="60"/>
                                 <ComboBoxItem Content="30 Hz" Tag="30"/>
+                            </ComboBox>
+                        </Grid>
+                        <Grid>
+                            <TextBlock Text="Codec" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="Codec" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="codec">
+                                <ComboBoxItem Content="Automatic" Tag="auto"/>
+                                <ComboBoxItem Content="H.264" Tag="avc"/>
+                                <ComboBoxItem Content="HEVC (H.265)" Tag="hevc"/>
                             </ComboBox>
                         </Grid>
                         <Grid>
@@ -81,6 +125,17 @@
                                 <ComboBoxItem Content="20 Mbit/s" Tag="20000"/>
                                 <ComboBoxItem Content="30 Mbit/s" Tag="30000"/>
                                 <ComboBoxItem Content="40 Mbit/s" Tag="40000"/>
+                                <ComboBoxItem Content="60 Mbit/s" Tag="60000"/>
+                            </ComboBox>
+                        </Grid>
+                        <Grid>
+                            <TextBlock Text="Largest frame" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="Vbv" HorizontalAlignment="Right" MinWidth="170" SelectionChanged="Changed" Tag="vbv_frames">
+                                <ComboBoxItem Content="Automatic" Tag="0"/>
+                                <ComboBoxItem Content="1× the average" Tag="1"/>
+                                <ComboBoxItem Content="2× the average" Tag="2"/>
+                                <ComboBoxItem Content="4× the average" Tag="4"/>
+                                <ComboBoxItem Content="8× the average" Tag="8"/>
                             </ComboBox>
                         </Grid>
                         <Grid>
@@ -97,12 +152,17 @@
                                 <ComboBoxItem Content="Automatic" Tag="0"/>
                                 <ComboBoxItem Content="Every 2 s" Tag="2"/>
                                 <ComboBoxItem Content="Every 5 s" Tag="5"/>
+                                <ComboBoxItem Content="Every 10 s" Tag="10"/>
                                 <ComboBoxItem Content="Every 30 s" Tag="30"/>
+                                <ComboBoxItem Content="Every 60 s" Tag="60"/>
                             </ComboBox>
                         </Grid>
-                        <TextBlock Text="From the next session" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <Grid>
+                            <TextBlock Text="From the next session" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Style="{StaticResource CaptionTextBlockStyle}"/>
+                            <Button Content="Restore defaults" Click="DefaultsClicked" HorizontalAlignment="Right"/>
+                        </Grid>
                         <TextBlock Text="Statistics" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,6,0,0"/>
-                        <TextBlock x:Name="Stats" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Shown while the desktop is on the tablet"/>
+                        <TextBlock x:Name="Stats" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Shown while the desktop is on the tablet" TextWrapping="Wrap"/>
                     </StackPanel>
                 </Expander>
             </StackPanel>

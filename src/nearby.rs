@@ -4,6 +4,7 @@
 use crate::protocol::SERVICE;
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::collections::HashMap;
+use std::os::windows::process::CommandExt;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -41,4 +42,24 @@ pub fn browse() -> Arc<Mutex<HashMap<String, Tablet>>> {
         }
     });
     found
+}
+
+/// A tablet's own Wi-Fi Direct group, joined as an ordinary Wi-Fi network (PROTOCOL.md §0):
+/// a profile for it, read by netsh from a file that lasts only that long.
+pub fn join(ssid: &str, passphrase: &str) -> crate::link::Result<()> {
+    let safe = |text: &str| text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let (name, key) = (safe(ssid), safe(passphrase));
+    let profile = format!(r#"<?xml version="1.0"?><WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1"><name>{name}</name><SSIDConfig><SSID><name>{name}</name></SSID></SSIDConfig><connectionType>ESS</connectionType><connectionMode>manual</connectionMode><MSM><security><authEncryption><authentication>WPA2PSK</authentication><encryption>AES</encryption><useOneX>false</useOneX></authEncryption><sharedKey><keyType>passPhrase</keyType><protected>false</protected><keyMaterial>{key}</keyMaterial></sharedKey></security></MSM></WLANProfile>"#);
+    let file = crate::link::config().join("direct.xml");
+    std::fs::create_dir_all(crate::link::config())?;
+    std::fs::write(&file, profile)?;
+    let run = |args: &[&str]| -> crate::link::Result<bool> {
+        Ok(std::process::Command::new("netsh").args(args).creation_flags(0x0800_0000).output()?.status.success())
+    };
+    let added = run(&["wlan", "add", "profile", &format!("filename={}", file.display()), "user=current"]);
+    let _ = std::fs::remove_file(&file);
+    if !added? || !run(&["wlan", "connect", &format!("name={ssid}"), &format!("ssid={ssid}")])? {
+        return Err(format!("could not join {ssid}: is Screenlet open on the tablet, with Wi-Fi on?").into());
+    }
+    Ok(())
 }
