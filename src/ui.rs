@@ -1,6 +1,6 @@
 //! The app: an icon by the clock, its menu, and the window (ui/, WinUI), a process of
 //! its own while it is open: this one stays small and keeps the session whatever it does.
-use crate::cable::{self, Cable, Plugged};
+use crate::cable::{self, Cable, Plug};
 use crate::display;
 use crate::link::{paired, Result};
 use crate::nearby::{self, Tablet};
@@ -48,7 +48,8 @@ struct Running {
 enum Way {
     /// On the network; the id to insist on, when it is known to be paired.
     Network(SocketAddr, Option<String>),
-    Cable,
+    /// On the cable: its serial.
+    Cable(String),
     /// Its own Wi-Fi Direct group, and its id.
     Direct { ssid: String, passphrase: String, at: String, id: String },
 }
@@ -76,7 +77,7 @@ struct App {
     screen: Option<(Child, ChildStdin)>, // the window, when open
     commands: Arc<Mutex<Vec<Value>>>,
     cable: Arc<Mutex<Option<Arc<Cable>>>>, // open across sessions: the tablet stays an accessory
-    plugged: Plugged,
+    plugged: Vec<Plug>,
     rested: bool, // the tablet was really unplugged: a session that ended cycles its port, and it comes back
     gone: u32,    // seconds with no tablet on the cable
     notice: Arc<Mutex<String>>,
@@ -118,11 +119,11 @@ fn ask(name: &str, code: &str) -> bool {
 fn path(way: &Way, cable: &Mutex<Option<Arc<Cable>>>, status: &Mutex<Status>) -> Result<Path> {
     match way {
         Way::Network(address, id) => Ok(Path::Network(*address, id.clone())),
-        Way::Cable => {
+        Way::Cable(serial) => {
             let mut open = cable.lock().unwrap();
-            if let Some(cable) = open.as_ref().filter(|c| c.alive()) { return Ok(Path::Cable(cable.clone())); }
+            if let Some(cable) = open.as_ref().filter(|c| c.alive() && c.serial == *serial) { return Ok(Path::Cable(cable.clone())); }
             status.lock().unwrap().state = "Opening the link over the cable… (allow Screenlet on the tablet)".into();
-            let opened = Cable::open()?;
+            let opened = Cable::open(Some(serial))?;
             *open = Some(opened.clone());
             Ok(Path::Cable(opened))
         }
@@ -164,7 +165,7 @@ impl App {
     fn list(&mut self) {
         let mut tablets: Vec<Tablet> = self.tablets.lock().unwrap().values().cloned().collect();
         tablets.sort_by_key(|t| t.name.to_lowercase());
-        let plugged = self.plugged != Plugged::None;
+        let plugged = !self.plugged.is_empty();
         let connection = self.mode.connection.as_str();
         let by_cable = plugged && connection != "wifi";
         let by_wifi = connection == "wifi" || (connection == "auto" && !plugged);
@@ -184,11 +185,16 @@ impl App {
             found.push(Action { device: t.name.clone(), detail: "Wi-Fi", short: "Connect", way: Some(Way::Network(t.address, None)), primary: true });
         }
         if by_cable {
-            let device = "Tablet on the cable".to_string();
-            if self.plugged == Plugged::Closed {
-                found.push(Action { device, detail: "Install Extend, or turn on USB debugging on it, to use the cable", short: "", way: None, primary: false });
-            } else {
-                found.push(Action { device, detail: "USB-C cable", short: "Connect", way: Some(Way::Cable), primary: true });
+            for plug in &self.plugged {
+                let twins = self.plugged.iter().filter(|p| p.name == plug.name).count() > 1;
+                let name = if plug.name.is_empty() { "Tablet on the cable" } else { &plug.name };
+                let tail = &plug.serial[plug.serial.len().saturating_sub(4)..];
+                let device = if twins { format!("{name} ({tail})") } else { name.to_string() };
+                if plug.open {
+                    found.push(Action { device, detail: "USB-C cable", short: "Connect", way: Some(Way::Cable(plug.serial.clone())), primary: true });
+                } else {
+                    found.push(Action { device, detail: "Install Extend, or turn on USB debugging on it, to use the cable", short: "", way: None, primary: false });
+                }
             }
         }
         // A paired tablet nowhere to be seen, whose own Wi-Fi Direct group this PC knows.
@@ -258,16 +264,18 @@ impl App {
 
     /// Each second: the cable, and what a session learned of its tablet.
     fn tick(&mut self) {
-        let alive = self.cable.lock().unwrap().as_ref().is_some_and(|c| c.alive());
-        let now = if alive { Plugged::Ready } else { cable::plugged() };
-        let was = std::mem::replace(&mut self.plugged, now);
-        self.gone = if now == Plugged::None { self.gone + 1 } else { 0 };
+        let now = cable::plugged();
+        let ready = now.iter().filter(|p| p.open).count();
+        let was = self.plugged.iter().filter(|p| p.open).count();
+        self.gone = if now.is_empty() { self.gone + 1 } else { 0 };
+        self.plugged = now;
         if self.gone >= REPLUG_SECONDS { self.rested = true; }
-        if now == Plugged::Ready && was != Plugged::Ready && self.rested && self.mode.auto_start && self.mode.connection != "wifi"
+        // Two to choose from: that is the user's to say.
+        if ready == 1 && was == 0 && self.rested && self.mode.auto_start && self.mode.connection != "wifi"
             && self.running.is_none() && !paired::all().is_empty() {
             self.list();
             // Plugged in: the desktop goes to it by itself.
-            if let Some(action) = self.listed.iter().find(|a| matches!(a.way, Some(Way::Cable))).cloned() { self.start(action, false); }
+            if let Some(action) = self.listed.iter().find(|a| matches!(a.way, Some(Way::Cable(_)))).cloned() { self.start(action, false); }
         }
         let screen = self.running.as_ref().and_then(|r| r.status.lock().unwrap().screen);
         if screen.is_some() && screen != self.mode.tablet_screen {
@@ -446,7 +454,7 @@ pub fn run(background: bool, manual: Option<SocketAddr>) {
         let manual = manual.map(|address| Tablet { id: String::new(), name: format!("Tablet at {}", address.ip()), address });
         let mut app = App { window, tablets: nearby::browse(), manual, listed: Vec::new(), running: None, ended: Arc::default(),
             restored: RegisterWindowMessageW(w!("TaskbarCreated")), mode: Mode::load(), message: String::new(), screen: None, commands: Arc::default(),
-            cable: Arc::default(), plugged: Plugged::None, rested: true, gone: 0, notice: Arc::default(), installing: false, monitors: (Instant::now(), display::monitors()) };
+            cable: Arc::default(), plugged: Vec::new(), rested: true, gone: 0, notice: Arc::default(), installing: false, monitors: (Instant::now(), display::monitors()) };
         icon(window, NIM_ADD, &app.tip(), None);
         if !background { app.open(); }
         SetTimer(Some(window), 1, 1000, None);

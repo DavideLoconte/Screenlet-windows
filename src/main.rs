@@ -27,7 +27,7 @@ screenlet --background            only the icon
 screenlet --install-driver        what Extend needs (as administrator)
 screenlet --install-cable         what the cable needs (as administrator)
 screenlet --uninstall-driver      all of these away again
-screenlet --tablets               the tablets on the network
+screenlet --tablets               the tablets on the network and on the cable
 screenlet --pair ADDRESS          pair with the tablet at ADDRESS, comparing the code
 screenlet --pair-cable | --pair-wifi      pair, comparing the code here and on the tablet
 screenlet --show ADDRESS SECONDS  the desktop on the tablet, for a while
@@ -37,7 +37,8 @@ screenlet --show-direct SECONDS [OPTIONS] or on a paired tablet's own Wi-Fi Dire
                                   with the latency logged stage by stage every 2 s
     options: mirror, h264 or hevc, latency, balanced or clarity, 30, 60, 90 or 120 (Hz;
              the tablet's otherwise), native, WxH, small or large (packets),
-             pattern (a test pattern instead of the desktop)
+             pattern (a test pattern instead of the desktop), serial=SERIAL (which
+             tablet on the cable, as --tablets lists them; the first otherwise)
 screenlet --bench SECONDS [hevc]  this PC's part alone: the test pattern encoded, sealed
                                   and sent to itself, its stages measured";
 
@@ -68,7 +69,7 @@ fn main() {
         (Some("--uninstall-driver"), _) => display::uninstall().and(cable::uninstall()),
         (Some("--pair"), Some(to)) => address(to).and_then(|a| pair(Path::Network(a, None))),
         (Some("--show"), Some(to)) => address(to).and_then(|a| show(Path::Network(a, None), args.get(3).and_then(|s| s.parse().ok()).unwrap_or(20), Mode::load(), false)),
-        (Some("--pair-cable"), _) => cable::Cable::open().and_then(|c| pair(Path::Cable(c))),
+        (Some("--pair-cable"), _) => cable::Cable::open(None).and_then(|c| pair(Path::Cable(c))),
         (Some("--pair-wifi"), _) => any_tablet(false).and_then(pair),
         (Some("--show-cable" | "--show-wifi" | "--show-direct"), _) => measure(&args),
         (Some("--bench"), _) => bench(args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10), args.get(3).is_some_and(|c| c == "hevc")),
@@ -88,6 +89,9 @@ fn tablets() -> link::Result<()> {
     std::thread::sleep(Duration::from_secs(5));
     for tablet in found.lock().unwrap().values() {
         println!("{} at {} ({})", tablet.name, tablet.address, if link::paired::by_id(&tablet.id).is_some() { "paired" } else { "not paired" });
+    }
+    for plug in cable::plugged() {
+        println!("{} on the cable, serial={}{}", plug.name, plug.serial, if plug.open { "" } else { " (nothing here can reach it)" });
     }
     Ok(())
 }
@@ -139,8 +143,10 @@ fn direct() -> link::Result<Path> {
 fn measure(args: &[String]) -> link::Result<()> {
     let mut mode = Mode::load();
     let mut pattern = false;
+    let mut serial = None;
     for word in args.iter().skip(3) {
         match word.as_str() {
+            on if on.starts_with("serial=") => serial = Some(on["serial=".len()..].to_uppercase()),
             "mirror" => mode.extend = false,
             "h264" => mode.codec = "avc".into(),
             "hevc" => mode.codec = "hevc".into(),
@@ -154,7 +160,7 @@ fn measure(args: &[String]) -> link::Result<()> {
     }
     session::STATS_EVERY.store(2, Ordering::Relaxed);
     let path = match args[1].as_str() {
-        "--show-cable" => Path::Cable(cable::Cable::open()?),
+        "--show-cable" => Path::Cable(cable::Cable::open(serial.as_deref())?),
         "--show-direct" => direct()?,
         _ => any_tablet(true)?,
     };

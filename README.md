@@ -18,7 +18,9 @@ This is the Windows half of Screenlet. The tablet runs
 1. Download the installer from [Releases](../../releases) and run it. Windows asks once
    about the display driver.
 2. Plug the tablet in, or have it on the same Wi-Fi as the PC, and open Screenlet.
-3. Click **Connect**. The first time, check that both screens show the same six digits.
+3. Click **Connect** beside your tablet. The first time, check that both screens show the
+   same six digits. With two on the cable, each has its own line; one shows the desktop at
+   a time.
 
 **Disconnect** ends it. The tablet then asks to allow access to its files, as it does
 whenever it is plugged in. Connect works whether or not that was answered.
@@ -103,8 +105,6 @@ Also tried with a Pixel 9a (Extend and Mirror on Wi-Fi and the cable, fingers) a
 HiBreak Pro (Extend on Wi-Fi, both codecs and Mirror on the cable, fingers). A HiBreak
 Pro's decoder keeps about 100 ms of frames while the whole picture moves, so the bitrate
 falls to its lowest; a still or mostly still desktop is at about 40 ms.
-
-With two tablets on the cable, Screenlet takes the first it finds: leave one plugged in.
 
 ## To do
 

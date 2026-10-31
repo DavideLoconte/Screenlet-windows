@@ -16,6 +16,8 @@ use windows::Win32::Devices::Display::*;
 use windows::Win32::Devices::Enumeration::Pnp::*;
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, INVALID_HANDLE_VALUE};
 use windows::Win32::Graphics::Dxgi::*;
+use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_TYPE_BYTE, PIPE_WAIT};
 use windows::Win32::System::Services::*;
@@ -136,21 +138,27 @@ unsafe extern "system" fn service_main(_: u32, _: *mut PWSTR) {
         STATUS = status;
         report(SERVICE_RUNNING);
         std::thread::spawn(crate::cable::serve);
-        serve(PIPE, || device().ok(), |device| SwDeviceClose(device));
+        serve(PIPE, false, |_| device().ok(), |device| SwDeviceClose(device));
         report(SERVICE_STOPPED);
     }
 }
 
-/// A pipe of the service. For each app that connects: start, a byte that says how that went,
-/// and end when it hangs up, however it does. Returns only if there can be no pipe.
-pub fn serve<T>(name: &str, start: impl Fn() -> Option<T>, end: impl Fn(T)) {
+/// A pipe of the service. For each app that connects: what it says first, if this pipe
+/// listens; start; a byte that says how that went; and end when it hangs up, however it
+/// does. Returns only if there can be no pipe.
+pub fn serve<T>(name: &str, listens: bool, start: impl Fn(&[u8]) -> Option<T>, end: impl Fn(T)) {
     unsafe {
-        // The default access: anyone may connect to read, which is all an app has to do.
-        let pipe = CreateNamedPipeW(&HSTRING::from(name), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 16, 16, 0, None);
+        // Whoever is signed in here may also write, for an app to say which tablet it means.
+        let mut access = PSECURITY_DESCRIPTOR::default();
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(w!("D:(A;;GA;;;SY)(A;;GRGW;;;BA)(A;;GRGW;;;IU)"), SDDL_REVISION_1, &mut access, None).is_err() { return; }
+        let attributes = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: access.0, bInheritHandle: false.into() };
+        let pipe = CreateNamedPipeW(&HSTRING::from(name), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 128, 16, 0, Some(&attributes));
         if pipe == INVALID_HANDLE_VALUE { return; }
         loop {
             if ConnectNamedPipe(pipe, None).is_ok() {
-                let done = start();
+                let (mut said, mut length) = ([0u8; 128], 0);
+                if listens { let _ = ReadFile(pipe, Some(&mut said), Some(&mut length), None); }
+                let done = start(&said[..length as usize]);
                 let _ = WriteFile(pipe, Some(&[done.is_some() as u8]), None, None);
                 let mut byte = [0u8; 1];
                 while ReadFile(pipe, Some(&mut byte), None, None).is_ok() {}
@@ -226,6 +234,18 @@ pub fn connect(name: &str) -> Result<std::fs::File> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match std::fs::File::open(name) {
+            Ok(pipe) => return Ok(pipe),
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(format!("the display service: {e}").into()),
+        }
+    }
+}
+
+/// A pipe of the service to say something on, as well as to hear it.
+pub fn speak(name: &str) -> Result<std::fs::File> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::fs::OpenOptions::new().read(true).write(true).open(name) {
             Ok(pipe) => return Ok(pipe),
             Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => return Err(format!("the display service: {e}").into()),

@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use windows::core::{GUID, HSTRING, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::*;
+use windows::Win32::Devices::Properties::*;
 use windows::Win32::Devices::Usb::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Storage::FileSystem::*;
@@ -180,31 +181,84 @@ fn accessories() -> Vec<String> {
     devices(&ACCESSORY).into_iter().filter(|p| ids(p).is_some_and(|(v, d)| is_accessory(v, d))).collect()
 }
 
+/// A tablet on the cable, whatever it shows itself as for now.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Plug {
+    pub serial: String, // the same as an accessory
+    pub name: String,
+    pub open: bool, // something here can reach it
+}
+
+/// The serial and the name of the device behind a device path or instance. A function of
+/// a composite device has a number for a last part: the device is its parent, of its maker.
+fn identity(path: &str) -> Option<(String, String)> {
+    let mut id = if path.contains('#') { instance(path)? } else { path.to_uppercase() };
+    let vendor = ids(&id)?.0;
+    unsafe {
+        let located: Vec<u16> = id.encode_utf16().chain([0]).collect();
+        let mut node = 0;
+        if CM_Locate_DevNodeW(&mut node, PCWSTR(located.as_ptr()), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS { return None; }
+        for _ in 0..2 {
+            let (mut parent, mut name) = (0, [0u16; 256]);
+            if !id.rsplit('\\').next()?.contains('&') { break; }
+            if CM_Get_Parent(&mut parent, node, 0) != CR_SUCCESS || CM_Get_Device_IDW(parent, &mut name, 0) != CR_SUCCESS { break; }
+            let above = String::from_utf16_lossy(&name).trim_end_matches('\0').to_uppercase();
+            if ids(&above).is_none_or(|(v, _)| v != vendor) { break; }
+            (id, node) = (above, parent);
+        }
+        let (mut kind, mut text, mut size) = (DEVPROPTYPE::default(), [0u16; 128], 256u32);
+        let told = CM_Get_DevNode_PropertyW(node, &DEVPKEY_Device_BusReportedDeviceDesc, &mut kind, Some(text.as_mut_ptr() as _), &mut size, 0);
+        let name = if told == CR_SUCCESS { String::from_utf16_lossy(&text).trim_end_matches('\0').to_string() } else { String::new() };
+        Some((id.rsplit('\\').next()?.to_string(), name))
+    }
+}
+
+fn is(serial: &str) -> impl Fn(&String) -> bool + '_ {
+    move |path| identity(path).is_some_and(|(s, _)| s == serial)
+}
+
+/// One line for each tablet, however many functions it shows.
+fn merged(found: impl Iterator<Item = (String, String, bool)>) -> Vec<Plug> {
+    let mut plugs: Vec<Plug> = Vec::new();
+    for (serial, name, open) in found {
+        match plugs.iter_mut().find(|p| p.serial == serial) {
+            Some(plug) => {
+                plug.open |= open;
+                if plug.name.is_empty() { plug.name = name; }
+            }
+            None => plugs.push(Plug { serial, name, open }),
+        }
+    }
+    plugs.sort_by(|a, b| (&a.name, &a.serial).cmp(&(&b.name, &b.serial)));
+    plugs
+}
+
 /// As the service, for an app about to use the cable: a tablet with USB debugging off has its
 /// files' function given to WinUSB, until it is an accessory or the time is up.
-fn prepare() -> Result<()> {
-    if !accessories().is_empty() || devices(&ADB).iter().any(is_tablet) { return Ok(()); }
-    let tablet = with_files().into_iter().find(is_tablet).ok_or("no tablet on the cable")?;
+fn prepare(serial: &str) -> Result<()> {
+    let mine = is(serial);
+    if accessories().iter().any(&mine) || devices(&ADB).iter().filter(|p| is_tablet(p)).any(&mine) { return Ok(()); }
+    let tablet = with_files().into_iter().filter(is_tablet).find(&mine).ok_or("no tablet on the cable")?;
     let hardware = hardware_id(&tablet).ok_or("an odd device instance")?;
     let stem = tablet_stem(&hardware);
     sign_and_add(&stem, &[hardware])?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !devices(&ACCESSORY).iter().any(is_tablet) {
+    while !devices(&ACCESSORY).iter().filter(|p| is_tablet(p)).any(&mine) {
         if Instant::now() > deadline { let _ = remove(&stem); return Err("WinUSB did not take the tablet".into()); }
         std::thread::sleep(Duration::from_millis(100));
     }
+    let serial = serial.to_string();
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(20);
-        while accessories().is_empty() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(200)); }
+        while !accessories().iter().any(is(&serial)) && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(200)); }
         let _ = remove(&stem);
     });
     Ok(())
 }
 
 /// Pulls the cable out and back in, as far as the tablet can tell: Android leaves accessory mode.
-fn cycle() -> Result<()> {
-    let path = accessories().into_iter().next().ok_or("no accessory")?;
-    let id = instance(&path).ok_or("an odd device path")?;
+fn cycle(path: &str) -> Result<()> {
+    let id = instance(path).ok_or("an odd device path")?;
     unsafe {
         let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain([0]).collect() };
         let located = wide(&id);
@@ -236,12 +290,18 @@ fn cycle() -> Result<()> {
 pub fn serve() {
     // Nobody reads a service's stderr: what went wrong goes where an install's would.
     let note = |result: Result<()>| { let _ = display::logged(result); };
-    display::serve(PIPE, || { let ready = prepare(); let ok = ready.is_ok(); note(ready); ok.then_some(()) }, |()| {
+    display::serve(PIPE, true, |said| {
+        let serial = String::from_utf8_lossy(said).into_owned();
+        let ready = prepare(&serial);
+        let ok = ready.is_ok();
+        note(ready);
+        ok.then_some(serial)
+    }, |serial| {
         // The tablet stays an accessory if its app still holds the link when the port cycles.
         for _ in 0..4 {
             std::thread::sleep(Duration::from_secs(1));
-            if accessories().is_empty() { break; } // pulled out, or gone back
-            note(cycle());
+            let Some(path) = accessories().into_iter().find(is(&serial)) else { break }; // pulled out, or gone back
+            note(cycle(&path));
             std::thread::sleep(Duration::from_secs(2));
         }
     });
@@ -290,21 +350,14 @@ fn with_files() -> Vec<String> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Plugged {
-    None,
-    /// Nothing here can reach it: USB debugging is off, and no service to help.
-    Closed,
-    Ready,
-}
-
 /// What is on the cable: looked at every second. A tablet with USB debugging off shows only
 /// as a portable device (MTP), which only the service can open.
-pub fn plugged() -> Plugged {
+pub fn plugged() -> Vec<Plug> {
     let tablet = |p: &String| ids(p).is_some_and(|(v, _)| ANDROID_VENDORS.contains(&v));
-    if !devices(&ACCESSORY).is_empty() || devices(&ADB).iter().any(tablet) { return Plugged::Ready; }
-    if !with_files().iter().any(tablet) { return Plugged::None; }
-    if display::available() { Plugged::Ready } else { Plugged::Closed }
+    let service = display::available();
+    let reachable = devices(&ACCESSORY).into_iter().chain(devices(&ADB)).filter(tablet).map(|p| (p, true));
+    let found = reachable.chain(with_files().into_iter().filter(tablet).map(|p| (p, service)));
+    merged(found.filter_map(|(path, open)| identity(&path).map(|(serial, name)| (serial, name, open))))
 }
 
 /// A device through WinUSB.
@@ -411,6 +464,7 @@ fn switch(path: &str) -> Result<()> {
 
 pub struct Cable {
     held: Mutex<Option<std::fs::File>>, // to the service, which cycles the port when this closes
+    pub serial: String,
     usb: Usb,
     out: u8,
     writing: Mutex<()>,
@@ -422,21 +476,25 @@ pub struct Cable {
 }
 
 impl Cable {
-    /// Switches the tablet to accessory mode, opens it and waits for the app's
-    /// HELLO (the first time, Android asks its user). Blocks.
-    pub fn open() -> Result<Arc<Cable>> {
-        let accessory = || accessories().into_iter().next();
+    /// Switches this tablet (none: the first on the cable) to accessory mode, opens it and
+    /// waits for the app's HELLO (the first time, Android asks its user). Blocks.
+    pub fn open(serial: Option<&str>) -> Result<Arc<Cable>> {
+        let serial = match serial {
+            Some(serial) => serial.to_string(),
+            None => plugged().into_iter().find(|p| p.open).ok_or("no tablet on the cable, or nothing here can reach it")?.serial,
+        };
+        let accessory = || accessories().into_iter().find(is(&serial));
         // Blocks while the service gets the tablet ready, the first time by signing for it.
-        let mut held = display::connect(PIPE).ok();
+        let mut held = display::speak(PIPE).ok();
         if let Some(pipe) = held.as_mut() {
             let mut ready = [0u8; 1];
-            if pipe.read_exact(&mut ready).is_err() || ready[0] != 1 {
+            if pipe.write_all(serial.as_bytes()).is_err() || pipe.read_exact(&mut ready).is_err() || ready[0] != 1 {
                 return Err("the tablet on the cable is not ready: unlock it, and try again".into());
             }
         }
         if accessory().is_none() {
             let reachable = devices(&ADB).into_iter().chain(devices(&ACCESSORY));
-            let tablet = reachable.into_iter().find(is_tablet);
+            let tablet = reachable.filter(is_tablet).find(is(&serial));
             switch(&tablet.ok_or("no tablet on the cable, or nothing here can reach it")?)?;
         }
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -461,7 +519,7 @@ impl Cable {
         usb.timeout(input, Duration::from_secs(1))?;
         usb.timeout(out, Duration::from_secs(1))?;
         let cable = Arc::new(Cable {
-            held: Mutex::new(held), usb, out, writing: Mutex::new(()), streams: Mutex::new(HashMap::new()), next: Mutex::new(0),
+            held: Mutex::new(held), serial, usb, out, writing: Mutex::new(()), streams: Mutex::new(HashMap::new()), next: Mutex::new(0),
             running: AtomicBool::new(true), on_datagram: Mutex::new(None),
         });
         // HELLO until the app reads it (Android asks its user the first time), then its answer.
@@ -684,6 +742,13 @@ mod tests {
         assert_eq!(ids(r"\\?\usb#vid_04e8&pid_6860&mi_03#6&315cdb0b&0&0003#{f72fe0d4-cbcb-407d-8814-9ed673d0dd6b}"), Some((0x04E8, 0x6860)));
         assert_eq!(ids(r"\\?\USB#VID_18D1&PID_2D01&MI_00#7&1#{x}"), Some((GOOGLE, 0x2D01)));
         assert_eq!(ids(r"\\?\swd#wpdbusenum#x"), None);
+    }
+
+    #[test]
+    fn each_tablet_is_one_line_with_the_name_of_any_function() {
+        let line = |serial: &str, name: &str, open| (serial.to_string(), name.to_string(), open);
+        let plugs = merged([line("B651", "", false), line("B651", "HiBreak", true), line("5902", "Pixel 9a", true), line("9999", "Galaxy", false)].into_iter());
+        assert_eq!(plugs.iter().map(|p| (p.name.as_str(), p.open)).collect::<Vec<_>>(), [("Galaxy", false), ("HiBreak", true), ("Pixel 9a", true)]);
     }
 
     #[test]
