@@ -40,9 +40,11 @@ const IDENTITY: [&str; 6] = ["Screenlet", "Screenlet", "Screenlet on the PC", "1
 
 const GOOGLE: u16 = 0x18D1;
 /// Android tablets' makers: Samsung, Google, Lenovo, Xiaomi, OnePlus, Motorola,
-/// Huawei, OPPO/realme, Honor, Amazon, Asus, Sony, TCL, Nothing.
-pub const ANDROID_VENDORS: [u16; 14] = [0x04E8, 0x18D1, 0x17EF, 0x2717, 0x2A70, 0x22B8, 0x12D1, 0x22D9,
-                                        0x339B, 0x1949, 0x0B05, 0x0FCE, 0x1BBB, 0x2B0E];
+/// Huawei, OPPO/realme, Honor, Amazon, Asus, Sony, TCL, Nothing. Then the chips' makers,
+/// whose ids smaller brands keep (a Bigme is MediaTek's): MediaTek, Qualcomm, Unisoc, Rockchip.
+pub const ANDROID_VENDORS: [u16; 18] = [0x04E8, 0x18D1, 0x17EF, 0x2717, 0x2A70, 0x22B8, 0x12D1, 0x22D9,
+                                        0x339B, 0x1949, 0x0B05, 0x0FCE, 0x1BBB, 0x2B0E,
+                                        0x0E8D, 0x05C6, 0x1782, 0x2207];
 /// The device interface Android's debugging drivers register with WinUSB.
 const ADB: GUID = GUID::from_u128(0xF72FE0D4_CBCB_407D_8814_9ED673D0DD6B);
 /// The one this program's own INFs register.
@@ -202,31 +204,32 @@ fn prepare() -> Result<()> {
 /// Pulls the cable out and back in, as far as the tablet can tell: Android leaves accessory mode.
 fn cycle() -> Result<()> {
     let path = accessories().into_iter().next().ok_or("no accessory")?;
-    let mut id = instance(&path).ok_or("an odd device path")?;
+    let id = instance(&path).ok_or("an odd device path")?;
     unsafe {
         let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain([0]).collect() };
         let located = wide(&id);
         let mut node = 0;
         if CM_Locate_DevNodeW(&mut node, PCWSTR(located.as_ptr()), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS { return Err("no such device".into()); }
-        if id.contains("&MI_") { // a function of the tablet: the tablet is its parent
-            let function = node;
-            if CM_Get_Parent(&mut node, function, 0) != CR_SUCCESS { return Err("no parent".into()); }
+        // A function of the tablet is under the tablet, named as its composite driver likes
+        // (Samsung's has no &MI_): the port is the one on the first parent that is a hub.
+        for _ in 0..3 {
+            let (mut port, mut size) = (0u32, 4u32);
+            if CM_Get_DevNode_Registry_PropertyW(node, CM_DRP_ADDRESS, None, Some(&mut port as *mut u32 as _), &mut size, 0) != CR_SUCCESS { return Err("no port".into()); }
+            let device = node;
+            if CM_Get_Parent(&mut node, device, 0) != CR_SUCCESS { return Err("no hub".into()); }
+            let mut name = [0u16; 256];
+            if CM_Get_Device_IDW(node, &mut name, 0) != CR_SUCCESS { return Err("no hub's name".into()); }
+            let parent = String::from_utf16_lossy(&name).trim_end_matches('\0').to_string();
+            let Ok(hub) = CreateFileW(&HSTRING::from(format!(r"\\?\{}#{HUB}", parent.replace('\\', "#"))), (GENERIC_READ | GENERIC_WRITE).0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None) else { continue };
+            let (mut params, mut returned) = ([port, 0], 0);
+            let done = DeviceIoControl(hub, IOCTL_USB_HUB_CYCLE_PORT, Some(params.as_ptr() as _), 8, Some(params.as_mut_ptr() as _), 8, Some(&mut returned), None);
+            let _ = CloseHandle(hub);
+            done?;
+            return Ok(());
         }
-        let (mut port, mut size) = (0u32, 4u32);
-        if CM_Get_DevNode_Registry_PropertyW(node, CM_DRP_ADDRESS, None, Some(&mut port as *mut u32 as _), &mut size, 0) != CR_SUCCESS { return Err("no port".into()); }
-        let device = node;
-        if CM_Get_Parent(&mut node, device, 0) != CR_SUCCESS { return Err("no hub".into()); }
-        let mut name = [0u16; 256];
-        if CM_Get_Device_IDW(node, &mut name, 0) != CR_SUCCESS { return Err("no hub's name".into()); }
-        id = String::from_utf16_lossy(&name).trim_end_matches('\0').to_string();
-        let hub = CreateFileW(&HSTRING::from(format!(r"\\?\{}#{HUB}", id.replace('\\', "#"))), (GENERIC_READ | GENERIC_WRITE).0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None)?;
-        let (mut params, mut returned) = ([port, 0], 0);
-        let done = DeviceIoControl(hub, IOCTL_USB_HUB_CYCLE_PORT, Some(params.as_ptr() as _), 8, Some(params.as_mut_ptr() as _), 8, Some(&mut returned), None);
-        let _ = CloseHandle(hub);
-        done?;
     }
-    Ok(())
+    Err("no hub".into())
 }
 
 /// The service's pipe for the cable, on a thread of its own.
@@ -681,5 +684,13 @@ mod tests {
         assert_eq!(ids(r"\\?\usb#vid_04e8&pid_6860&mi_03#6&315cdb0b&0&0003#{f72fe0d4-cbcb-407d-8814-9ed673d0dd6b}"), Some((0x04E8, 0x6860)));
         assert_eq!(ids(r"\\?\USB#VID_18D1&PID_2D01&MI_00#7&1#{x}"), Some((GOOGLE, 0x2D01)));
         assert_eq!(ids(r"\\?\swd#wpdbusenum#x"), None);
+    }
+
+    #[test]
+    fn tablets_are_known_by_their_maker_or_their_chips() {
+        assert!(is_tablet(&r"USB\VID_18D1&PID_4EE7\59021JEBF24606".to_string())); // Pixel 9a
+        assert!(is_tablet(&r"USB\VID_0E8D&PID_201D&MI_00\6&1812223E&0&0000".to_string())); // HiBreak Pro
+        assert!(!is_tablet(&r"USB\VID_18D1&PID_2D01&MI_00\6&1&0".to_string())); // already an accessory
+        assert!(!is_tablet(&r"USB\VID_046D&PID_C52B\1".to_string()));
     }
 }

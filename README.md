@@ -99,9 +99,17 @@ CI tests and builds every push. A `v*` tag publishes the installer in a release.
 Tried on a Galaxy Tab S6 Lite and an Intel UHD 620: pairing, Extend, Mirror, both codecs,
 Wi-Fi, the cable with USB debugging on and off, fingers, the pen, the window.
 
+Also tried with a Pixel 9a (Extend and Mirror on Wi-Fi and the cable, fingers) and a Bigme
+HiBreak Pro (Extend on Wi-Fi, both codecs and Mirror on the cable, fingers). A HiBreak
+Pro's decoder keeps about 100 ms of frames while the whole picture moves, so the bitrate
+falls to its lowest; a still or mostly still desktop is at about 40 ms.
+
+With two tablets on the cable, Screenlet takes the first it finds: leave one plugged in.
+
 ## To do
 
-- Run the installer on a clean PC: driver, service and the cable's INF.
+- Run the installer on a clean PC: driver, service and the cable's INF. Over an earlier
+  install it works.
 - Finish the benchmarks on the cable, by codec and priority. So far: H.264 at 100 Hz for
   Lowest latency, 21 ms and 73 fps of the 100 asked for; find out why it stops there.
 - Try Wi-Fi Direct with the tablet off Wi-Fi and off the cable (`--show-direct`), and
