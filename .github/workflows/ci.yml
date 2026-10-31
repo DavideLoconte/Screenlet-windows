@@ -44,7 +44,7 @@ jobs:
           mkdir -p dist
           cp target/x86_64-pc-windows-gnu/release/screenlet.exe dist/
           dotnet publish ui/Screenlet.csproj -c Release -o dist/window
-          iscc="$(ls "/c/Program Files (x86)"/Inno\ Setup*/ISCC.exe "/c/Program Files"/Inno\ Setup*/ISCC.exe 2>/dev/null | head -1)"
+          iscc="$( (find "/c/Program Files (x86)" "/c/Program Files" -maxdepth 2 -name ISCC.exe 2>/dev/null || true) | head -1)"
           "$iscc" //Q "//DVersion=$version" installer/screenlet.iss
 
       - uses: actions/upload-artifact@v5
