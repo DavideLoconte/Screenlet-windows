@@ -63,3 +63,16 @@ pub fn join(ssid: &str, passphrase: &str) -> crate::link::Result<()> {
     }
     Ok(())
 }
+
+/// The address of a tablet's Wi-Fi Direct group, joined and answering.
+pub fn reach(ssid: &str, passphrase: &str, at: &str) -> crate::link::Result<SocketAddr> {
+    join(ssid, passphrase)?;
+    let address: SocketAddr = format!("{at}:{}", crate::protocol::PORT).parse()?;
+    // The network comes up some seconds after joining it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1)).is_err() {
+        if std::time::Instant::now() > deadline { return Err("the tablet's Wi-Fi Direct network did not answer".into()); }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    Ok(address)
+}

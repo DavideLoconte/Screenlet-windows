@@ -33,11 +33,12 @@ screenlet --pair-cable | --pair-wifi      pair, comparing the code here and on t
 screenlet --show ADDRESS SECONDS  the desktop on the tablet, for a while
 screenlet --show-cable SECONDS [OPTIONS]  the desktop on the tablet on the cable, for a while,
 screenlet --show-wifi SECONDS [OPTIONS]   or on the first paired tablet on the network,
+screenlet --show-direct SECONDS [OPTIONS] or on a paired tablet's own Wi-Fi Direct group,
                                   with the latency logged stage by stage every 2 s
     options: mirror, h264 or hevc, latency, balanced or clarity, 30, 60, 90 or 120 (Hz;
              the tablet's otherwise), native, WxH, small or large (packets),
              pattern (a test pattern instead of the desktop)
-screenlet --bench SECONDS         this PC's part alone: the test pattern encoded, sealed
+screenlet --bench SECONDS [hevc]  this PC's part alone: the test pattern encoded, sealed
                                   and sent to itself, its stages measured";
 
 fn address(text: &str) -> link::Result<SocketAddr> {
@@ -69,8 +70,8 @@ fn main() {
         (Some("--show"), Some(to)) => address(to).and_then(|a| show(Path::Network(a, None), args.get(3).and_then(|s| s.parse().ok()).unwrap_or(20), Mode::load(), false)),
         (Some("--pair-cable"), _) => cable::Cable::open().and_then(|c| pair(Path::Cable(c))),
         (Some("--pair-wifi"), _) => any_tablet(false).and_then(pair),
-        (Some("--show-cable" | "--show-wifi"), _) => measure(&args),
-        (Some("--bench"), _) => bench(args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10)),
+        (Some("--show-cable" | "--show-wifi" | "--show-direct"), _) => measure(&args),
+        (Some("--bench"), _) => bench(args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10), args.get(3).is_some_and(|c| c == "hevc")),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -125,6 +126,16 @@ fn show(path: Path, seconds: u64, mode: Mode, pattern: bool) -> link::Result<()>
     session::run(&path, &mode, pattern, None, &status, &stop, &AtomicBool::new(false))
 }
 
+/// The Wi-Fi Direct group of the first paired tablet that told this PC about one.
+fn direct() -> link::Result<Path> {
+    for (fingerprint, entry) in link::paired::all() {
+        let (Some(ssid), Some(passphrase)) = (entry["p2p"]["ssid"].as_str(), entry["p2p"]["passphrase"].as_str()) else { continue };
+        let address = nearby::reach(ssid, passphrase, entry["p2p"]["at"].as_str().unwrap_or("192.168.49.1"))?;
+        return Ok(Path::Network(address, Some(fingerprint.chars().take(16).collect())));
+    }
+    Err("no paired tablet told this PC its Wi-Fi Direct group yet: connect to it once by Wi-Fi or the cable".into())
+}
+
 fn measure(args: &[String]) -> link::Result<()> {
     let mut mode = Mode::load();
     let mut pattern = false;
@@ -142,14 +153,18 @@ fn measure(args: &[String]) -> link::Result<()> {
         }
     }
     session::STATS_EVERY.store(2, Ordering::Relaxed);
-    let path = if args[1] == "--show-cable" { Path::Cable(cable::Cable::open()?) } else { any_tablet(true)? };
+    let path = match args[1].as_str() {
+        "--show-cable" => Path::Cable(cable::Cable::open()?),
+        "--show-direct" => direct()?,
+        _ => any_tablet(true)?,
+    };
     show(path, args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20), mode, pattern)
 }
 
 /// This PC's stages alone, with no tablet: the test pattern at 1920x1200@60 through the
 /// encoder, packetized, sealed and sent to a socket here, where they are opened and put
 /// together again. Reports each stage's median.
-fn bench(seconds: u64) -> link::Result<()> {
+fn bench(seconds: u64, hevc: bool) -> link::Result<()> {
     use protocol::*;
     let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
     let to = socket.local_addr()?;
@@ -165,8 +180,8 @@ fn bench(seconds: u64) -> link::Result<()> {
     let mut body = vec![0u8; VIDEO_HEADER + LARGE_PAYLOAD];
     let mut packet = vec![0u8; MAX_PACKET];
     let size = (1920, 1200);
-    let codec = video::codecs(false).remove(0);
-    let video = video::Video::start(video::Source::Pattern(size), &codec, 60, 20000, 4.0, size, video::KEYFRAME_SECONDS, Box::new(|| false),
+    let codec = video::codecs(hevc).remove(0);
+    let video = video::Video::start(video::Source::Pattern(size), &codec, 60, 20000, 4.0, 0, size, video::KEYFRAME_SECONDS, Box::new(|| false),
         Box::new(move |bytes, keyframe, captured, into| {
             c.lock().unwrap().push((into - captured) as f64 / 1e6);
             e.lock().unwrap().push((video::now() - into) as f64 / 1e6);

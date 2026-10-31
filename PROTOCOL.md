@@ -1,8 +1,7 @@
 # Screenlet protocol, version 1
 
-Normative spec for the link between a **computer** (Screenlet for macOS;
-Linux and Windows are future work) and the **app** (Screenlet Companion for
-Android). It derives from Plus One's protocol version 3, without its camera,
+Normative spec for the link between a **computer** (Screenlet for macOS,
+GNOME or Windows) and the **app** (Screenlet Companion for Android). It derives from Plus One's protocol version 3, without its camera,
 microphone, speaker and PDF-signing messages. MUST, SHOULD and MAY are used
 as in RFC 2119. All integers are big-endian unless marked `le`. `‖` is
 concatenation. `hex()` is lowercase hex.

@@ -162,7 +162,10 @@ pub fn run(path: &Path, mode: &Mode, pattern: bool, ask: Option<&dyn Fn(&str, &s
         Source::Screen(monitor.as_ref().map(|m| m.name.clone()).or(mirrored))
     };
     let fit = if monitor.is_some() { size } else { screen };
-    let video = Arc::new(Video::start(source, &codec, fps, rate.kbps, vbv, fit, mode.keyframes, skip, on_frame)?);
+    // Intel's HEVC at its default takes 21 ms a frame and misses 60 Hz, at 0 12 ms; at 25, the
+    // most that keeps 60 Hz, 17 ms. H.264 hardly minds.
+    let quality = if mode.priority == "clarity" { 25 } else { 0 };
+    let video = Arc::new(Video::start(source, &codec, fps, rate.kbps, vbv, quality, fit, mode.keyframes, skip, on_frame)?);
     eprintln!("app display: {}x{}@{fps} {codec} ({}) {} kbit/s{}", video.size.0, video.size.1, video.name, rate.kbps,
               if wifi { " over Wi-Fi" } else { " over the cable" });
 

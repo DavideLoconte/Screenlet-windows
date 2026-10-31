@@ -1,13 +1,17 @@
 ; Screenlet's installer: iscc installer\screenlet.iss, from the published files in ..\dist
+#ifndef Version
+  #define Version "0.1.0"
+#endif
+
 [Setup]
 AppName=Screenlet
-AppVersion=0.1.0
+AppVersion={#Version}
 AppPublisher=Davide Loconte
 DefaultDirName={autopf}\Screenlet
 DefaultGroupName=Screenlet
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=Screenlet-0.1.0-setup
+OutputBaseFilename=Screenlet-{#Version}-setup
 SetupIconFile=..\data\screenlet.ico
 UninstallDisplayIcon={app}\screenlet.exe
 Compression=lzma2/ultra64

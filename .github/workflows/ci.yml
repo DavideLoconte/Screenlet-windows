@@ -1,0 +1,59 @@
+# Every push and pull request is tested and built into the installer, uploaded as the
+# run's artifact. A v* tag also publishes a release with it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write  # the release, on a tag
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build environment
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal --no-self-update
+          choco install innosetup --no-progress -y
+          echo "C:/mingw64/bin" >> "$GITHUB_PATH"
+
+      - name: Test
+        run: cargo +stable-x86_64-pc-windows-gnu test --locked --target x86_64-pc-windows-gnu
+
+      - name: The tag is the version
+        if: github.ref_type == 'tag'
+        run: '[ "v$(sed -n "s/^version = \"\(.*\)\"/\1/p" Cargo.toml | head -1 | tr -d "\r")" = "$GITHUB_REF_NAME" ]'
+
+      - name: Build
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1 | tr -d '\r')"
+          cargo +stable-x86_64-pc-windows-gnu build --release --locked --target x86_64-pc-windows-gnu
+          mkdir -p dist
+          cp target/x86_64-pc-windows-gnu/release/screenlet.exe dist/
+          dotnet publish ui/Screenlet.csproj -c Release -o dist/window
+          iscc="$(ls "/c/Program Files (x86)"/Inno\ Setup*/ISCC.exe "/c/Program Files"/Inno\ Setup*/ISCC.exe 2>/dev/null | head -1)"
+          "$iscc" //Q "//DVersion=$version" installer/screenlet.iss
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: Screenlet-windows
+          path: dist/Screenlet-*-setup.exe
+
+      - name: Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "Screenlet for Windows $GITHUB_REF_NAME" --generate-notes dist/Screenlet-*-setup.exe

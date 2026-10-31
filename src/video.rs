@@ -134,7 +134,7 @@ pub type OnFrame = Box<dyn FnMut(&[u8], bool, i64, i64) + Send>;
 impl Video {
     /// on_frame on the capture thread; skip() leaves a frame out.
     #[allow(clippy::too_many_arguments)]
-    pub fn start(source: Source, codec: &str, fps: u32, kbps: u32, vbv_frames: f64, fit: (i32, i32), keyframes: u32, skip: Box<dyn Fn() -> bool + Send>, on_frame: OnFrame) -> Result<Video> {
+    pub fn start(source: Source, codec: &str, fps: u32, kbps: u32, vbv_frames: f64, quality: u32, fit: (i32, i32), keyframes: u32, skip: Box<dyn Fn() -> bool + Send>, on_frame: OnFrame) -> Result<Video> {
         let control = Arc::new(Control { kbps: AtomicU32::new(kbps), ..Default::default() });
         let skipped = control.skipped.clone();
         let error = Arc::new(Mutex::new(None));
@@ -142,7 +142,7 @@ impl Video {
         let (c, e) = (control.clone(), error.clone());
         let subtype = if codec == "hevc" { MFVideoFormat_HEVC } else { MFVideoFormat_H264 };
         let thread = std::thread::Builder::new().name("screenlet-video".into()).spawn(move || {
-            let result = unsafe { Capture::open(&source, subtype, fps, c.kbps.load(Ordering::Relaxed), vbv_frames, fit, if keyframes > 0 { keyframes } else { KEYFRAME_SECONDS }) };
+            let result = unsafe { Capture::open(&source, subtype, fps, c.kbps.load(Ordering::Relaxed), vbv_frames, quality, fit, if keyframes > 0 { keyframes } else { KEYFRAME_SECONDS }) };
             let mut capture = match result {
                 Ok(capture) => {
                     let _ = ready_tx.send(Ok((capture.encoder.name.clone(), capture.size, (capture.screen.0 as i32, capture.screen.1 as i32), capture.origin)));
@@ -272,6 +272,7 @@ struct Wanted {
     fps: u32,
     kbps: u32,
     vbv_frames: f64,
+    quality: u32, // 0 the quickest, 100 the best
     keyframes: u32,
 }
 
@@ -306,7 +307,7 @@ impl Encoder {
     }
 
     unsafe fn activate(activate: &IMFActivate, manager: Option<&IMFDXGIDeviceManager>, wanted: Wanted) -> Result<Encoder> {
-        let Wanted { subtype, width, height, fps, kbps, vbv_frames, keyframes } = wanted;
+        let Wanted { subtype, width, height, fps, kbps, vbv_frames, quality, keyframes } = wanted;
         let mut text = windows::core::PWSTR::null();
         let mut length = 0;
         activate.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut text, &mut length)?;
@@ -327,6 +328,7 @@ impl Encoder {
         encoder.set(&CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR.0 as u32);
         encoder.set(&CODECAPI_AVEncMPVDefaultBPictureCount, 0);
         encoder.set(&CODECAPI_AVEncCommonBufferSize, (kbps as f64 * encoder.vbv_bits) as u32);
+        encoder.set(&CODECAPI_AVEncCommonQualityVsSpeed, quality);
         let size = (width as u64) << 32 | height as u64;
         let rate = (fps as u64) << 32 | 1;
         let out = MFCreateMediaType()?;
@@ -526,7 +528,7 @@ struct Capture {
 }
 
 impl Capture {
-    unsafe fn open(source: &Source, subtype: GUID, fps: u32, kbps: u32, vbv_frames: f64, fit: (i32, i32), keyframes: u32) -> Result<Capture> {
+    unsafe fn open(source: &Source, subtype: GUID, fps: u32, kbps: u32, vbv_frames: f64, quality: u32, fit: (i32, i32), keyframes: u32) -> Result<Capture> {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         MFStartup(MF_VERSION, MFSTARTUP_FULL)?;
         // The chosen monitor, or the first one, and its adapter.
@@ -584,7 +586,7 @@ impl Capture {
         let scaled = crate::sizes::fit((screen.0 as i32, screen.1 as i32), fit);
         let to = (scaled.0 as u32 & !1, scaled.1 as u32 & !1);
         // The GPU's way, if all of it is there; any failure and the frames take the CPU's.
-        let wanted = Wanted { subtype, width: to.0, height: to.1, fps, kbps, vbv_frames, keyframes };
+        let wanted = Wanted { subtype, width: to.0, height: to.1, fps, kbps, vbv_frames, quality, keyframes };
         let fast = Encoder::hardware(&device, luid, wanted)
             .and_then(|encoder| Ok((encoder, Gpu::open(&device, &context, &canvas, screen, to, fps)?)));
         let (encoder, gpu, size) = match fast {
@@ -657,7 +659,9 @@ impl Capture {
     /// The test pattern at fps, instead of the desktop.
     unsafe fn run_pattern(&mut self, control: &Control, skip: Box<dyn Fn() -> bool + Send>, mut on_frame: OnFrame, fps: u32, plane: &mut [u8]) -> Result<()> {
         let (width, height) = (self.screen.0 as usize, self.screen.1 as usize);
-        let mut picture = vec![0u8; width * height * 4];
+        // Drawn once, twice as wide, and panned: the cost measured is the path's, not the drawing's.
+        let mut picture = vec![0u8; width * 2 * height * 4];
+        pattern(&mut picture, width * 2, height, 0);
         let mut target = None;
         let mut frame = 0;
         let started = Instant::now();
@@ -672,8 +676,8 @@ impl Capture {
                 continue;
             }
             let captured = now();
-            pattern(&mut picture, width, height, frame);
-            self.context.UpdateSubresource(&self.canvas, 0, None, picture.as_ptr() as _, width as u32 * 4, 0);
+            let from = picture.as_ptr().add((frame * 7 % width) * 4);
+            self.context.UpdateSubresource(&self.canvas, 0, None, from as _, width as u32 * 2 * 4, 0);
             self.convert(plane, &mut target)?;
             let keyframe = control.keyframe.swap(false, Ordering::Relaxed);
             let into = now();

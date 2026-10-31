@@ -4,7 +4,6 @@ use crate::cable::{self, Cable, Plugged};
 use crate::display;
 use crate::link::{paired, Result};
 use crate::nearby::{self, Tablet};
-use crate::protocol::PORT;
 use crate::session::{self, Path, Status};
 use crate::settings::{start_with_windows, starts_with_windows, Mode};
 use crate::sizes;
@@ -129,15 +128,7 @@ fn path(way: &Way, cable: &Mutex<Option<Arc<Cable>>>, status: &Mutex<Status>) ->
         }
         Way::Direct { ssid, passphrase, at, id } => {
             status.lock().unwrap().state = format!("Joining {ssid}…");
-            nearby::join(ssid, passphrase)?;
-            let address: SocketAddr = format!("{at}:{PORT}").parse()?;
-            // The network comes up some seconds after joining it.
-            let deadline = Instant::now() + Duration::from_secs(15);
-            while std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_err() {
-                if Instant::now() > deadline { return Err("the tablet's Wi-Fi Direct network did not answer".into()); }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            Ok(Path::Network(address, Some(id.clone())))
+            Ok(Path::Network(nearby::reach(ssid, passphrase, at)?, Some(id.clone())))
         }
     }
 }

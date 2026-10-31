@@ -415,7 +415,9 @@ impl Cable {
         let mut held = display::connect(PIPE).ok();
         if let Some(pipe) = held.as_mut() {
             let mut ready = [0u8; 1];
-            if pipe.read_exact(&mut ready).is_err() || ready[0] != 1 { eprintln!("usb: the service could not get the tablet ready"); }
+            if pipe.read_exact(&mut ready).is_err() || ready[0] != 1 {
+                return Err("the tablet on the cable is not ready: unlock it, and try again".into());
+            }
         }
         if accessory().is_none() {
             let reachable = devices(&ADB).into_iter().chain(devices(&ACCESSORY));
