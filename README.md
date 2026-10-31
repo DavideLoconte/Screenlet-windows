@@ -21,7 +21,7 @@ This is the Windows half of Screenlet. The tablet runs
 3. Click **Connect**. The first time, check that both screens show the same six digits.
 
 **Disconnect** ends it. The tablet then asks to allow access to its files, as it does
-whenever it is plugged in.
+whenever it is plugged in. Connect works whether or not that was answered.
 
 The window sets Extend or Mirror (and which monitor), the resolution, what to optimize
 for and the connection. Under Advanced are refresh rate, codec, bitrate, largest frame,
@@ -99,10 +99,22 @@ CI tests and builds every push. A `v*` tag publishes the installer in a release.
 Tried on a Galaxy Tab S6 Lite and an Intel UHD 620: pairing, Extend, Mirror, both codecs,
 Wi-Fi, the cable with USB debugging on and off, fingers, the pen, the window.
 
-Not tried yet: running the installer, the tablet's side of Wi-Fi Direct, a discrete GPU.
+## To do
 
-Not there yet: 2× scaling on tablets 2560 pixels wide or more, as the other two do it
-(Windows has no documented call for it).
+- Run the installer on a clean PC: driver, service and the cable's INF.
+- Finish the benchmarks on the cable, by codec and priority. So far: H.264 at 100 Hz for
+  Lowest latency, 21 ms and 73 fps of the 100 asked for; find out why it stops there.
+- Try Wi-Fi Direct with the tablet off Wi-Fi and off the cable (`--show-direct`), and
+  whether the PC goes back to its own Wi-Fi afterwards.
+- Try plugging in again after Disconnect, with the desktop shown on plugging in.
+- Finish a run of Connect, Disconnect and Connect again with the tablet's question about
+  its files left unanswered: the first such run passed.
+- Try a discrete GPU: NVENC, AMD, and the pointer in the frames.
+- Publish the first release with a `v0.1.0` tag, once the installer is tried. That step of
+  CI has not run yet.
+- 2× scaling on tablets 2560 pixels wide or more, as the other two do it (Windows has no
+  documented call for it, and it takes a tablet that wide to try).
+- The fidelity measure Screenlet for macOS has.
 
 ## License
 

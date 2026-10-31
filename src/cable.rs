@@ -47,8 +47,8 @@ pub const ANDROID_VENDORS: [u16; 14] = [0x04E8, 0x18D1, 0x17EF, 0x2717, 0x2A70, 
 const ADB: GUID = GUID::from_u128(0xF72FE0D4_CBCB_407D_8814_9ED673D0DD6B);
 /// The one this program's own INFs register.
 const ACCESSORY: GUID = GUID::from_u128(0x7C1D5F3A_6C4E_4F0B_9B7A_3E2A5D6C8F10);
-/// What a tablet shows as, for its files.
-const PORTABLE: GUID = GUID::from_u128(0x6AC27878_A6FA_4155_BA85_F98F491D4F33);
+/// The driver of a tablet's files.
+const FILES_DRIVER: PCWSTR = windows::core::w!("WUDFWpdMtp");
 
 const ACCESSORY_INF: &str = "screenlet-usb";
 const TABLET_INF: &str = "screenlet-tablet"; // and the tablet's ids: one INF for each kind
@@ -153,10 +153,9 @@ pub fn install() -> Result<()> {
     sign_and_add(ACCESSORY_INF, &[r"USB\VID_18D1&PID_2D00".to_string(), r"USB\VID_18D1&PID_2D01&MI_00".to_string()])
 }
 
-/// The hardware id in a device path: \\?\usb#vid_04e8&pid_6860&mi_00#... is USB\VID_04E8&PID_6860&MI_00.
-fn hardware_id(path: &str) -> Option<String> {
-    let mut parts = path.trim_start_matches(r"\\?\").split('#');
-    Some(format!(r"{}\{}", parts.next()?, parts.next()?).to_uppercase())
+/// The hardware id of a device instance: USB\VID_04E8&PID_6860&MI_00\6&315&0 is USB\VID_04E8&PID_6860&MI_00.
+fn hardware_id(instance: &str) -> Option<String> {
+    instance.rsplit_once('\\').map(|(id, _)| id.to_uppercase())
 }
 
 /// The device instance in a device path: USB\VID_04E8&PID_6860&MI_00\6&315&0&0000.
@@ -183,8 +182,8 @@ fn accessories() -> Vec<String> {
 /// files' function given to WinUSB, until it is an accessory or the time is up.
 fn prepare() -> Result<()> {
     if !accessories().is_empty() || devices(&ADB).iter().any(is_tablet) { return Ok(()); }
-    let tablet = devices(&PORTABLE).into_iter().find(is_tablet).ok_or("no tablet on the cable")?;
-    let hardware = hardware_id(&tablet).ok_or("an odd device path")?;
+    let tablet = with_files().into_iter().find(is_tablet).ok_or("no tablet on the cable")?;
+    let hardware = hardware_id(&tablet).ok_or("an odd device instance")?;
     let stem = tablet_stem(&hardware);
     sign_and_add(&stem, &[hardware])?;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -275,6 +274,19 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+/// The devices on the driver of a tablet's files, by instance. Not by their interface: a tablet
+/// shows that one only once its user allows access to its files.
+fn with_files() -> Vec<String> {
+    let flags = CM_GETIDLIST_FILTER_SERVICE | CM_GETIDLIST_FILTER_PRESENT;
+    let mut size = 0;
+    unsafe {
+        if CM_Get_Device_ID_List_SizeW(&mut size, FILES_DRIVER, flags) != CR_SUCCESS { return Vec::new(); }
+        let mut list = vec![0u16; size as usize];
+        if CM_Get_Device_ID_ListW(FILES_DRIVER, &mut list, flags) != CR_SUCCESS { return Vec::new(); }
+        list.split(|u| *u == 0).filter(|p| !p.is_empty()).map(String::from_utf16_lossy).collect()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Plugged {
     None,
@@ -288,7 +300,7 @@ pub enum Plugged {
 pub fn plugged() -> Plugged {
     let tablet = |p: &String| ids(p).is_some_and(|(v, _)| ANDROID_VENDORS.contains(&v));
     if !devices(&ACCESSORY).is_empty() || devices(&ADB).iter().any(tablet) { return Plugged::Ready; }
-    if !devices(&PORTABLE).iter().any(tablet) { return Plugged::None; }
+    if !with_files().iter().any(tablet) { return Plugged::None; }
     if display::available() { Plugged::Ready } else { Plugged::Closed }
 }
 
@@ -658,7 +670,8 @@ mod tests {
         let text = inf(&[r"USB\VID_18D1&PID_2D00".to_string()], "x.cat");
         assert!(text.contains(r"%Name%=Device, USB\VID_18D1&PID_2D00"));
         assert!(text.contains("CatalogFile=x.cat\r\n") && text.contains("Needs=WINUSB.NT\r\n") && text.contains("Signature=\"$Windows NT$\""));
-        assert_eq!(hardware_id(r"\\?\usb#vid_04e8&pid_6860&mi_00#6&315#{6ac27878}").as_deref(), Some(r"USB\VID_04E8&PID_6860&MI_00"));
+        assert_eq!(hardware_id(r"USB\VID_04E8&PID_6860&MI_00\6&315&0&0000").as_deref(), Some(r"USB\VID_04E8&PID_6860&MI_00"));
+        assert_eq!(hardware_id(r"USB\VID_04E8&PID_6860\R52N50L1F5R").as_deref(), Some(r"USB\VID_04E8&PID_6860"));
         assert_eq!(instance(r"\\?\usb#vid_18d1&pid_2d01&mi_00#6&195d4289&0&0000#{7c1d}").as_deref(), Some(r"USB\VID_18D1&PID_2D01&MI_00\6&195D4289&0&0000"));
         assert_eq!(tablet_stem(r"USB\VID_04E8&PID_6860&MI_00"), "screenlet-tablet-usb-vid-04e8-pid-6860-mi-00");
     }
